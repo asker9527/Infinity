@@ -1,0 +1,83 @@
+# Infinity — Project Tree
+
+- Infinity/  
+  - .gitignore：Git 忽略规则。  
+  - DockerFile：用于构建项目的 Docker 镜像（复现实验/推理环境）。  
+  - README.md：项目总览、模型介绍、训练/评估/推理说明与示例命令（主文档）。  
+  - LICENSE：许可证（MIT）。  
+  - cog.yaml：Cog 平台部署配置（指定 `predict.py:Predictor`、依赖与运行命令）。  
+  - conf.py：配置信息占位（包含 HF token 等占位变量）。  
+  - requirements.txt：Python 依赖列表（pip 包版本与安装项）。  
+  - predict.py：Cog 推理接口实现（`Predictor` 类），使用 `tools.run_infinity` 提供的加载与生成函数进行推理。  
+  - train.py：训练入口脚本；解析参数、构建数据/模型/优化器并启动训练循环（与 `trainer.InfinityTrainer` 配合）。  
+  - trainer.py：训练器实现（`InfinityTrainer`），包含训练步、评估、EMA 管理、保存/加载 state_dict 与日志上报。  
+  - `scripts/`（bash 脚本）：封装常用运行命令  
+    - train.sh：标准训练命令示例（torchrun 封装）。  
+    - eval.sh：评估流程封装（调用 `evaluation/` 中的工具评测指标）。  
+    - infer.sh：推理/批量生成脚本封装。  
+  - `assets/`（示例图片与可视化素材，用于 README 展示）  
+    - `2b_8b/`：Infinity-2B/8B 比较图像（示例输出）。  
+    - `2b_20b/`：示例输出图片集。  
+    - `framework_row.png` / `scaling_models.png` / `scaling_vocabulary.png` / `show_images.jpg`：README 中展示的可视化图示。  
+  - `data/`（示例及说明）  
+    - `infinity_toy_data/`：小型 toy 数据集，用于快速测试与示例。  
+    - `labels/`：可能的标签/元数据文件夹。  
+  - `evaluation/`（评估脚本与 benchmark 集成）  
+    - README.md：评估使用说明。  
+    - `gen_eval/`：GenEval 评估相关脚本与工具  
+      - create_prompts.py：用于生成/准备评估 prompts 的脚本。  
+      - infer4eval.py：用于批量推理以生成用于评估的图像。  
+      - evaluate_images.py：计算 GenEval 指标/分数的脚本。  
+      - summary_scores.py：统计/汇总评估结果。  
+      - rename.py：批量重命名/组织评估输出的工具。  
+      - `_base_/`：评估所需的配置与 dataset 定义（mask2former 相关配置示例）。  
+    - `image_reward/`：ImageReward 评估集成文件  
+      - cal_imagereward.py：计算 ImageReward 分数的脚本。  
+      - infer4eval.py：为 ImageReward 生成输入/推理脚本。  
+    - `hpsv2/`：HPSv2 评估工具  
+      - eval_hpsv2.py：HPSv2 基准评估脚本。  
+    - `validation_loss/`：验证损失评估工具  
+      - validation_loss.py：计算/记录验证损失的脚本。  
+  - `tools/`（推理与辅助工具）  
+    - run_infinity.py：推理/加载工具集合，提供 `load_tokenizer`、`load_visual_tokenizer`、`load_infinity`、`gen_one_img` 等函数；也是命令行推理的主脚本入口。  
+    - run_tokenizer.py：可用于训练或运行视觉 tokenizer（VAE）的脚本。  
+    - comprehensive_infer.py：更复杂/批量推理流程（带评估或齐备的推理设置）。  
+    - reproduce.py：复现 demo 的脚本（Docker 示例中使用）。  
+    - fid_score.py：计算 FID 分数的工具。  
+    - inception.py：Inception / feature 提取辅助脚本（用于 FID）。  
+    - prompt_rewriter.py：提示改写/增强工具（评估时可选的 prompt 前处理）。  
+    - `interactive_infer.ipynb` / `interactive_infer_8b*.ipynb`：交互式推理 notebook 示例。  
+    - `ipynb_tmp.jpg`：notebook 中临时用的图片资源。  
+  - `infinity/`（核心源码包）  
+    - __init__.py：包初始化。  
+    - `models/`（模型实现与 VAE）  
+      - __init__.py：models 包初始化。  
+      - basic.py：基础模块与公用算子（模型构建的低级组件）。  
+      - infinity.py：核心自回归 Transformer 实现（Infinity 类），包含 `autoregressive_infer_cfg`、forward 与模型结构定义——生成与训练的核心代码。  
+      - bitwise_self_correction.py：Bitwise Self-Correction (BSC) 的实现，论文中的训练改进模块。  
+      - init_param.py：模型参数初始化工具与策略。  
+      - ema.py：EMA（指数移动平均）工具函数，用于训练中权重平滑/保存。  
+      - flex_attn.py：FlexAttention / 自定义 Attention 加速实现（可与 FlashAttention集成）。  
+      - fused_op.py：融合操作与自定义高效算子（性能优化点）。  
+      - t5.py：与 T5/text encoder 相关的封装/适配代码。  
+      - `bsq_vae/`（视觉 tokenizer / VAE 子包）  
+        - conv.py：卷积相关模块/层定义（VAE 使用）。  
+        - multiscale_bsq.py：多尺度残差量化逻辑（Bitwise / 多尺度量化实现核心）。  
+        - dynamic_resolution.py：VAE 侧的尺度/分辨率调度器（和 dynamic_resolution.py 配合）。  
+        - vae.py：VAE 模型主体（encode/decode、输出 bit indices、quantizer 等）。  
+        - flux_vqgan.py：与 VQGAN/flux 量化实现相关的辅助模块。  
+    - `dataset/`（数据读取与构建）  
+      - build.py：dataset 构造与工厂函数（封装 dataset 创建逻辑）。  
+      - dataset_t2i_iterable.py：支持大规模/流式训练的数据集实现，解析 JSONL、文本 tokenization 与样本生成（README 提到支持 >100M）。  
+    - `utils/`（训练与运行工具）  
+      - arg_util.py：命令行参数解析与默认配置（`Args` 类等）。  
+      - amp_opt.py：混合精度/优化器封装（`AmpOptimizer`，封装 backward/clip/step）。  
+      - dist.py：分布式训练工具（rank/size/barrier/初始化封装）。  
+      - dynamic_resolution.py：动态分辨率/scale schedule 数据结构与查询函数（训练/推理时根据 h/w ratio 选择 scales）。  
+      - load.py：VAE 与 GPT 的构建与加载工具（`build_vae_gpt` 等）。  
+      - save_and_load.py：检查点保存/恢复逻辑（CKPTSaver、auto_resume）。  
+      - wandb_utils.py：Weighs & Biases 日志封装。  
+      - lr_control.py：学习率与参数分组过滤工具。  
+      - misc.py：通用辅助函数（日志、metric、随机/种子管理等）。  
+      - csv_util.py：CSV 操作辅助函数。  
+      - large_file_util.py：处理大文件（流式、分片、拷贝等）工具。  
