@@ -459,6 +459,7 @@ class Infinity(nn.Module):
         vae=None,
         scale_schedule=None,
         label_B_or_BLT=None,
+        src_img_features = None,
         B=1, negative_label_B_or_BLT=None, force_gt_Bhw=None,
         g_seed=None, cfg_list=[], tau_list=[], cfg_sc=3, top_k=0, top_p=0.0,
         returns_vemb=0, ratio_Bl1=None, gumbel=0, norm_cfg=False,
@@ -734,7 +735,7 @@ class Infinity(nn.Module):
                         idx_Bld = idx_Bld.permute(0,3,1,2) 
                         idx_Bld = torch.nn.functional.pixel_shuffle(idx_Bld, 2) 
                         idx_Bld = idx_Bld.permute(0,2,3,1) 
-                    idx_Bld = idx_Bld.unsqueeze(1) 
+                    idx_Bld = idx_Bld.unsqueeze(1) # [B, 1, h, w, d] or [B, 1, 2h, 2w, d]
 
                 idx_Bld_list.append(idx_Bld)
                 

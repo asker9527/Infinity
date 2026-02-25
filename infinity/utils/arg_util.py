@@ -27,7 +27,7 @@ class Args(Tap):
     project_name: str = 'Infinity'      # name of wandb project
     tf32: bool = True                   # whether to use TensorFloat32
     auto_resume: bool = True            # whether to automatically resume from the last checkpoint found in args.bed
-    rush_resume: str = ''               # pretrained infinity checkpoint
+    rush_resume: str = '/picassox/oss-picassox-train-release/segmentation/intern_segmentation/dc1/models/FoundationVision/Infinity/infinity_2b_reg.pth'               # pretrained infinity checkpoint
     nowd: int = 1                       # whether to disable weight decay on sparse params (like class token)
     enable_hybrid_shard: bool = False   # whether to use hybrid FSDP
     inner_shard_degree: int = 1         # inner degree for FSDP
@@ -366,9 +366,11 @@ def init_dist_and_get_args():
     # 1. 定义路径变量 (请修改这里)
     local_out_path = "./output/checkpoints"
     bed_path = "/picassox/oss-picassox-train-release/segmentation/intern_segmentation/dc1/models/Foundation/Infinity"
-    data_path = "/picassox/oss-picassox-train-release/data-hub/data-collection/ImageNet/imagenet-1k-256x256/data"
+    data_path = "/picassox/intelligent-cpfs/segmentation/intern_segmentation/dc1/Infinity/data/Asker9527/Remote_Sense_Datasets/DIOR/train"
+    val_data_path = "/picassox/intelligent-cpfs/segmentation/intern_segmentation/dc1/Infinity/data/Asker9527/Remote_Sense_Datasets/DIOR/test"
     video_data_path = ""
-    exp_name = "debug_experiment"
+    exp_name = "debug_experiment022502"
+    bed_path = os.path.join(bed_path, exp_name)
 
     # 2. 覆盖 args 参数
     args.ep = 2
@@ -385,24 +387,25 @@ def init_dist_and_get_args():
     args.cos = 1
     args.enable_checkpointing = 'full-block'
     args.local_out_path = local_out_path
-    args.task_type = 't2i'
+    args.task_type = 'RS'
     args.bed = bed_path
     args.data_path = data_path
+    args.val_data_path = val_data_path
     args.video_data_path = video_data_path
     args.exp_name = exp_name
-    args.tblr = 6e-3
+    args.tblr = 6e-5
     args.pn = '0.06M'      # 这种带单位的通常是字符串处理
     args.model = '2bc8'
-    args.lbs = 4
+    args.lbs = 64
     args.workers = 8
     args.short_cap_prob = 0.5
     args.online_t5 = 1
     args.use_streaming_dataset = 1  # 对应命令行中的 1
     args.iterable_data_buffersize = 30000
     args.Ct5 = 2048
-    args.t5_path = 'weights/flan-t5-xl'
+    args.t5_path = '/picassox/oss-picassox-train-release/segmentation/intern_segmentation/dc1/models/google/flan-t5-xl'
     args.vae_type = 32
-    args.vae_ckpt = 'weights/infinity_vae_d32_rdn_short.pth'
+    args.vae_ckpt = '/picassox/oss-picassox-train-release/segmentation/intern_segmentation/dc1/models/FoundationVision/Infinity/infinity_vae_d32.pth'
     args.wp = 0.00000001
     args.wpe = 1
     args.dynamic_resolution_across_gpus = 1
@@ -414,7 +417,7 @@ def init_dist_and_get_args():
     args.use_fsdp_model_ema = 0
     args.always_training_scales = 100
     args.use_bit_label = 1
-    args.zero = 2
+    args.zero = 0
     args.save_model_iters_freq = 100
     args.log_freq = 50
     args.checkpoint_type = 'torch'
@@ -422,7 +425,7 @@ def init_dist_and_get_args():
     args.noise_apply_strength = 0.3
     args.noise_apply_layers = 13
     args.apply_spatial_patchify = 0
-    args.use_flex_attn = True    # 命令行是 True
+    args.use_flex_attn = False    # 命令行是 True, 设为True会导致CUDA error
     args.pad = 128
 
     # -----------------------------------------------------------------

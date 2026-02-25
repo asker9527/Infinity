@@ -119,15 +119,15 @@ def gen_one_img(
         negative_label_B_or_BLT = None
     print(f'cfg: {cfg_list}, tau: {tau_list}')
 
-    src_img_3HW = src_image.unsqueeze(0).to('cuda', non_blocking=True)    # [B=1,c=3,h=256,w=256]
-    src_img_features, _, _ = vae.encode_for_raw_features(src_img_3HW, scale_schedule=scale_schedule)    # [B, 32, 16,16]
+    # src_img_3HW = src_image.unsqueeze(0).to('cuda', non_blocking=True)    # [B=1,c=3,h=256,w=256]
+    # src_img_features, _, _ = vae.encode_for_raw_features(src_img_3HW, scale_schedule=scale_schedule)    # [B, 32, 16,16]
 
     with torch.cuda.amp.autocast(enabled=True, dtype=torch.bfloat16, cache_enabled=True):
         stt = time.time()
         _, _, img_list = infinity_test.autoregressive_infer_cfg(
             vae=vae,
             scale_schedule=scale_schedule,
-            label_B_or_BLT=text_cond_tuple, src_img_features=src_img_features, g_seed=g_seed,
+            label_B_or_BLT=text_cond_tuple, src_img_features=None, g_seed=g_seed,
             B=1, negative_label_B_or_BLT=negative_label_B_or_BLT, force_gt_Bhw=None,
             cfg_sc=cfg_sc, cfg_list=cfg_list, tau_list=tau_list, top_k=top_k, top_p=top_p,
             returns_vemb=1, ratio_Bl1=None, gumbel=gumbel, norm_cfg=False,

@@ -174,7 +174,7 @@ class InfinityTrainer(object):
                     else:
                         vae_scale_schedule = scale_schedule
                     raw_features, _, _ = self.vae_local.encode_for_raw_features(inp_B3HW, scale_schedule=vae_scale_schedule)
-            
+        
             x_BLC_wo_prefix, gt_ms_idx_Bl = self.bitwise_self_correction.flip_requant(vae_scale_schedule, inp_B3HW, raw_features, device)
             # x_BLC_wo_prefix: torch.Size([bs, 2*2+3*3+...+64*64, d or 4d])
 
@@ -204,7 +204,7 @@ class InfinityTrainer(object):
 
             if self.reweight_loss_by_scale:
                 lw = []
-                last_scale_area = np.sqrt(scale_schedule[-1].prod())
+                last_scale_area = np.sqrt(scale_schedule[-1]).prod()
                 for (pt, ph, pw) in scale_schedule[:training_scales]:
                     this_scale_area = np.sqrt(pt * ph * pw)
                     lw.extend([last_scale_area / this_scale_area for _ in range(pt * ph * pw)])
@@ -261,8 +261,8 @@ class InfinityTrainer(object):
                 ptr = end
             
             metrics = torch.tensor(L_list + acc_bit_list + acc_token_list +[grad_norm_t.item(), loss_token_mean, acc_bit_mean, acc_token_mean], device=loss.device)
-            tdist.all_reduce(metrics, op=tdist.ReduceOp.SUM)
-            metrics = metrics.cpu().data.numpy() / dist.get_world_size()
+            # tdist.all_reduce(metrics, op=tdist.ReduceOp.SUM)
+            # metrics = metrics.cpu().data.numpy() / dist.get_world_size()
             leng = len(L_list)
             L_list, acc_bit_list, acc_token_list, grad_norm_t, loss_token_mean, acc_bit_mean, acc_token_mean = metrics[:leng], \
                 metrics[leng:2*leng], metrics[2*leng:3*leng], metrics[-4], metrics[-3], metrics[-2], metrics[-1]

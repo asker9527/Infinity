@@ -23,6 +23,7 @@ import torch.distributed as tdist
 
 import infinity.utils.dist as dist
 from infinity.dataset.build import build_t2i_dataset
+from infinity.dataset.RS_datasets import get_RS_datasets
 from infinity.utils.save_and_load import CKPTSaver, auto_resume
 from infinity.utils import arg_util, misc, wandb_utils
 from infinity.utils.dynamic_resolution import dynamic_resolution_h_w
@@ -37,9 +38,11 @@ def build_everything_from_args(args: arg_util.Args, saver):
 
     # build data
     iters_train, ld_train, ld_val = build_dataloaders(args)   
-    train_h_div_w_list = list(ld_train.dataset.h_div_w_template2generator.keys())
-    print(f"{train_h_div_w_list=}")
-    args.train_h_div_w_list = train_h_div_w_list 
+    # train_h_div_w_list = list(ld_train.dataset.h_div_w_template2generator.keys())
+    # print(f"{train_h_div_w_list=}")
+    # args.train_h_div_w_list = train_h_div_w_list 
+    args.train_h_div_w_list = ["1.0"]
+
 
     # load VAE
     print(f'Load vae form {args.vae_ckpt}')
@@ -131,6 +134,7 @@ def build_model_optimizer(args, vae_ckpt):
         gpt_wo_ddp.load_state_dict(drop_unfit_weights(state_dict), strict=False)
         if args.use_fsdp_model_ema:
             gpt_wo_ddp_ema.load_state_dict(drop_unfit_weights(ema_state_dict), strict=False)
+        print(f'[vgpt] rush resumed from {args.rush_resume}\n')
 
     if args.rwe:
         gpt_wo_ddp.word_embed.weight.requires_grad = False
@@ -260,15 +264,18 @@ def build_dataloaders(args):
             short_prob=args.short_cap_prob, 
             load_vae_instead_of_image=False
         )
+    elif args.task_type in ('RS', 'remote'):
+        dataset_train, _ = get_RS_datasets(train_path=args.data_path)
+        # dataset_train, dataset_val = get_RS_datasets(train_path=args.data_path, test_path=args.val_data_path)
     else:
         raise NotImplementedError(f'args.task_type={args.task_type} not supported')
     type_train_set = type(dataset_train).__name__
     vbs = round(args.batch_size * 1.5)
     print(f"{args.batch_size=}, {vbs=}", flush=True)
     ld_val = math.ceil(50000 / vbs)
-    ld_train = DataLoader(dataset=dataset_train, num_workers=args.workers, pin_memory=True, generator=args.get_different_generator_for_each_rank(), batch_size=None, prefetch_factor=args.prefetch_factor)
+    ld_train = DataLoader(dataset=dataset_train, num_workers=args.workers, pin_memory=True, generator=args.get_different_generator_for_each_rank(), batch_size=args.batch_size, prefetch_factor=args.prefetch_factor)
     iters_train = len(ld_train)
-    print(f'len(dataloader): {len(ld_train)}, len(dataset): {len(dataset_train)}, total_samples: {dataset_train.total_samples()}')
+    print(f'len(dataloader): {len(ld_train)}, len(dataset): {len(dataset_train)}')
     print(f'[dataloader] gbs={args.glb_batch_size}, lbs={args.batch_size}, iters_train={iters_train}, type(train_set)={type_train_set}')
     return iters_train, ld_train, ld_val
 
@@ -286,7 +293,8 @@ def main_train(args: arg_util.Args):
         iters_train, ld_train, ld_val
     ) = ret
     gc.collect(), torch.cuda.empty_cache()
-    
+
+
     # import heavy packages after Dataloader object creation
     from trainer import InfinityTrainer
     ret: Tuple[
@@ -294,7 +302,7 @@ def main_train(args: arg_util.Args):
         int, int, str, List[Tuple[float, float]], Optional[int], Optional[DataLoader], DataLoader,
     ]
 
-    world_size = int(os.environ["WORLD_SIZE"])
+    # world_size = int(os.environ["WORLD_SIZE"])
     start_time, min_L_mean, min_L_tail, max_acc_mean, max_acc_tail = time.time(), 999., 999., -1., -1.
     last_val_loss_mean, best_val_loss_mean, last_val_acc_mean, best_val_acc_mean = 999., 999., 0., 0.
     last_val_loss_tail, best_val_loss_tail, last_val_acc_tail, best_val_acc_tail = 999., 999., 0., 0.
@@ -317,7 +325,7 @@ def main_train(args: arg_util.Args):
             PARA_OT += p.numel()
     PARA_ALL = PARA_EMB + PARA_ALN + PARA_OT
     
-    trainer.gpt_opt.log_param(ep=-1)
+    # trainer.gpt_opt.log_param(ep=-1)
     time.sleep(3), gc.collect(), torch.cuda.empty_cache(), time.sleep(3)
     ep_lg = max(1, args.ep // 10) if args.ep <= 100 else max(1, args.ep // 20)
     
@@ -326,13 +334,15 @@ def main_train(args: arg_util.Args):
     epochs_loss_nan = 0
     # build wandb logger
     if dist.is_master():
-        wandb_utils.wandb.init(project=args.project_name, name=args.exp_name, config={})
+        os.environ["WANDB_KEY"] = "711f941f459be2c398272020e434baaf9bb1b2e7"
+        wandb_utils.initialize(args, entity='dingchi2036690098', exp_name=args.exp_name, project_name=args.project_name)
+        # wandb login --relogin 711f941f459be2c398272020e434baaf9bb1b2e7
     for ep in range(start_ep, args.ep):
         if ep % ep_lg == 0 or ep == start_ep:
             print(f'[PT info]  from ep{start_ep} it{start_it}, acc_str: {acc_str}, diffs: {args.diffs},    =======>  bed: {args.bed}  <=======\n')
         # set epoch for dataloader
-        if args.use_streaming_dataset:
-            ld_train.dataset.set_epoch(ep)
+        # if args.use_streaming_dataset:
+        #     ld_train.dataset.set_epoch(ep)
 
         # [train one epoch]
         stats, (sec, remain_time, finish_time) = train_one_ep(
@@ -363,57 +373,57 @@ def main_train(args: arg_util.Args):
             sys.exit(666)
         
         # [logging]
-        args.cur_phase = 'AR'
-        args.cur_ep = f'{ep+1}/{args.ep}'
-        args.remain_time, args.finish_time = remain_time, finish_time
-        args.last_Lnll, args.last_Ld, args.acc_all, args.acc_real, args.acc_fake, args.last_wei_g = min_L_mean, min_L_tail, None, (None if max_acc_mean < 0 else max_acc_mean), (None if max_acc_tail < 0 else max_acc_tail), grad_norm
-        if math.isfinite(args.last_wei_g) and args.last_wei_g > 4:
-            args.grad_boom = 'boom'
+        # args.cur_phase = 'AR'
+        # args.cur_ep = f'{ep+1}/{args.ep}'
+        # args.remain_time, args.finish_time = remain_time, finish_time
+        # args.last_Lnll, args.last_Ld, args.acc_all, args.acc_real, args.acc_fake, args.last_wei_g = min_L_mean, min_L_tail, None, (None if max_acc_mean < 0 else max_acc_mean), (None if max_acc_tail < 0 else max_acc_tail), grad_norm
+        # if math.isfinite(args.last_wei_g) and args.last_wei_g > 4:
+        #     args.grad_boom = 'boom'
         
-        AR_ep_loss = {}
-        is_val_and_also_saving = (ep + 1) % max(1, args.ep // 25) == 0 or (ep + 1) == args.ep
-        if (ep + 1) < 10:
-            law_stats = {
-                'last_Lm': L_mean, 'best_Lm': min_L_mean, 'last_Am': acc_mean, 'best_Am': max_acc_mean,
-                'last_Lt': L_tail, 'best_Lt': min_L_tail, 'last_At': acc_tail, 'best_At': max_acc_tail,
-                'pe': PARA_EMB, 'paln': PARA_ALN, 'pot': PARA_OT, 'pall': PARA_ALL,
-            }
-        elif is_val_and_also_saving:
-            if ld_val is None or isinstance(ld_val, int):    # args.nodata or args.nova
-                last_val_loss_mean, last_val_loss_tail, last_val_acc_mean, last_val_acc_tail, tot, cost = 0.666, 0.555, 5.55, 6.66, 50000, 0.001
-            else:
-                last_val_loss_mean, last_val_loss_tail, last_val_acc_mean, last_val_acc_tail, tot, cost = trainer.eval_ep(ep, args, ld_val)
+        # AR_ep_loss = {}
+        # is_val_and_also_saving = (ep + 1) % max(1, args.ep // 25) == 0 or (ep + 1) == args.ep
+        # if (ep + 1) < 10:
+        #     law_stats = {
+        #         'last_Lm': L_mean, 'best_Lm': min_L_mean, 'last_Am': acc_mean, 'best_Am': max_acc_mean,
+        #         'last_Lt': L_tail, 'best_Lt': min_L_tail, 'last_At': acc_tail, 'best_At': max_acc_tail,
+        #         'pe': PARA_EMB, 'paln': PARA_ALN, 'pot': PARA_OT, 'pall': PARA_ALL,
+        #     }
+        # elif is_val_and_also_saving:
+        #     if ld_val is None or isinstance(ld_val, int):    # args.nodata or args.nova
+        #         last_val_loss_mean, last_val_loss_tail, last_val_acc_mean, last_val_acc_tail, tot, cost = 0.666, 0.555, 5.55, 6.66, 50000, 0.001
+        #     else:
+        #         last_val_loss_mean, last_val_loss_tail, last_val_acc_mean, last_val_acc_tail, tot, cost = trainer.eval_ep(ep, args, ld_val)
             
-            best_val_loss_mean, best_val_loss_tail = min(best_val_loss_mean, last_val_loss_mean), min(best_val_loss_tail, last_val_loss_tail)
-            best_val_acc_mean, best_val_acc_tail = max(best_val_acc_mean, last_val_acc_mean), max(best_val_acc_tail, last_val_acc_tail)
-            AR_ep_loss['vL_mean'], AR_ep_loss['vL_tail'], AR_ep_loss['vacc_mean'], AR_ep_loss['vacc_tail'] = last_val_loss_mean, last_val_loss_tail, last_val_acc_mean, last_val_acc_tail
-            print(f'  [*] [ep{ep}]  VAL {tot}  |  Lm: {L_mean:.4f}, Lt: {L_tail:.4f}, Accm: {acc_mean:.2f}, Acct: {acc_tail:.2f}, cost: {cost:.2f}s')
-            law_stats = {
-                'last_Lm': last_val_loss_mean, 'best_Lm': best_val_loss_mean, 'last_Am': last_val_acc_mean, 'best_Am': best_val_acc_mean,
-                'last_Lt': last_val_loss_tail, 'best_Lt': best_val_loss_tail, 'last_At': last_val_acc_tail, 'best_At': best_val_acc_tail,
-                'pe': PARA_EMB, 'paln': PARA_ALN, 'pot': PARA_OT, 'pall': PARA_ALL,
-            }
-        else: law_stats = None
-        if dist.is_master() and law_stats is not None:
-            stat_file = os.path.join(args.bed, 'law.stat')
-            if os.path.exists(stat_file):
-                with open(stat_file, 'r', encoding='utf-8') as law_fp: tag_to_epv = json.load(law_fp)
-            else:
-                tag_to_epv = {tag: {} for tag in law_stats.keys()}
-            for tag, v in law_stats.items():
-                tag_to_epv[tag][ep + 1] = v
-            with open(stat_file, 'w', encoding='utf-8') as law_fp: json.dump(tag_to_epv, law_fp, indent=2)
+        #     best_val_loss_mean, best_val_loss_tail = min(best_val_loss_mean, last_val_loss_mean), min(best_val_loss_tail, last_val_loss_tail)
+        #     best_val_acc_mean, best_val_acc_tail = max(best_val_acc_mean, last_val_acc_mean), max(best_val_acc_tail, last_val_acc_tail)
+        #     AR_ep_loss['vL_mean'], AR_ep_loss['vL_tail'], AR_ep_loss['vacc_mean'], AR_ep_loss['vacc_tail'] = last_val_loss_mean, last_val_loss_tail, last_val_acc_mean, last_val_acc_tail
+        #     print(f'  [*] [ep{ep}]  VAL {tot}  |  Lm: {L_mean:.4f}, Lt: {L_tail:.4f}, Accm: {acc_mean:.2f}, Acct: {acc_tail:.2f}, cost: {cost:.2f}s')
+        #     law_stats = {
+        #         'last_Lm': last_val_loss_mean, 'best_Lm': best_val_loss_mean, 'last_Am': last_val_acc_mean, 'best_Am': best_val_acc_mean,
+        #         'last_Lt': last_val_loss_tail, 'best_Lt': best_val_loss_tail, 'last_At': last_val_acc_tail, 'best_At': best_val_acc_tail,
+        #         'pe': PARA_EMB, 'paln': PARA_ALN, 'pot': PARA_OT, 'pall': PARA_ALL,
+        #     }
+        # else: law_stats = None
+        # if dist.is_master() and law_stats is not None:
+        #     stat_file = os.path.join(args.bed, 'law.stat')
+        #     if os.path.exists(stat_file):
+        #         with open(stat_file, 'r', encoding='utf-8') as law_fp: tag_to_epv = json.load(law_fp)
+        #     else:
+        #         tag_to_epv = {tag: {} for tag in law_stats.keys()}
+        #     for tag, v in law_stats.items():
+        #         tag_to_epv[tag][ep + 1] = v
+        #     with open(stat_file, 'w', encoding='utf-8') as law_fp: json.dump(tag_to_epv, law_fp, indent=2)
             
-            # ============= LEGACY =============
-            with open(os.path.join(args.bed, 'law'), 'w') as law_fp:
-                json.dump({
-                    'last_Lm': last_val_loss_mean, 'best_Lm': best_val_loss_mean, 'last_Am': last_val_acc_mean, 'best_Am': best_val_acc_mean,
-                    'last_Lt': last_val_loss_tail, 'best_Lt': best_val_loss_tail, 'last_At': last_val_acc_tail, 'best_At': best_val_acc_tail,
-                    'pe': PARA_EMB, 'paln': PARA_ALN, 'pot': PARA_OT, 'pall': PARA_ALL,
-                }, law_fp, indent=2)
-        print(f'  [*] [ep{ep}]  Lmean: {min_L_mean:.3f} ({L_mean:.3f}), Ltail {min_L_tail:.3f} ({L_tail:.3f}),  Acc m-t: {max_acc_mean:.2f} {max_acc_tail:.2f},  Remain: {remain_time},  Finish: {finish_time}', flush=True)
-        AR_ep_loss['L_mean'], AR_ep_loss['L_tail'], AR_ep_loss['acc_mean'], AR_ep_loss['acc_tail'] = L_mean, L_tail, acc_mean, acc_tail        
-        args.dump_log()
+        #     # ============= LEGACY =============
+        #     with open(os.path.join(args.bed, 'law'), 'w') as law_fp:
+        #         json.dump({
+        #             'last_Lm': last_val_loss_mean, 'best_Lm': best_val_loss_mean, 'last_Am': last_val_acc_mean, 'best_Am': best_val_acc_mean,
+        #             'last_Lt': last_val_loss_tail, 'best_Lt': best_val_loss_tail, 'last_At': last_val_acc_tail, 'best_At': best_val_acc_tail,
+        #             'pe': PARA_EMB, 'paln': PARA_ALN, 'pot': PARA_OT, 'pall': PARA_ALL,
+        #         }, law_fp, indent=2)
+        # print(f'  [*] [ep{ep}]  Lmean: {min_L_mean:.3f} ({L_mean:.3f}), Ltail {min_L_tail:.3f} ({L_tail:.3f}),  Acc m-t: {max_acc_mean:.2f} {max_acc_tail:.2f},  Remain: {remain_time},  Finish: {finish_time}', flush=True)
+        # AR_ep_loss['L_mean'], AR_ep_loss['L_tail'], AR_ep_loss['acc_mean'], AR_ep_loss['acc_tail'] = L_mean, L_tail, acc_mean, acc_tail        
+        # args.dump_log()
     # ============================================= epoch loop ends =============================================
     
     total_time = f'{(time.time() - start_time) / 60 / 60:.1f}h'
@@ -465,16 +475,9 @@ def train_one_ep(
         for it, data in me.log_every(start_it, iters_train, ld_or_itrt, args.log_freq, args.log_every_iter, header):
             g_it = ep * iters_train + it
 
-            # calling inc_step to sync the global_step
-            if enable_timeline_sdk:
-                ndtimeline.inc_step()
-
             if (it+1) % FREQ == 0:
                 speed_ls.append((time.time() - last_t_perf) / FREQ)
                 last_t_perf = time.time()
-
-                if enable_timeline_sdk:
-                    ndtimeline.flush()
             
             if (g_it+1) % args.save_model_iters_freq == 0:
                 with misc.Low_GPU_usage(files=[args.log_txt_path], sleep_secs=3, verbose=True):
@@ -534,7 +537,7 @@ def train_one_ep(
                 me.update(tlr=max_tlr)
     # ============================================= iteration loop ends =============================================
     
-    me.synchronize_between_processes()
+    # me.synchronize_between_processes()
     return {k: meter.global_avg for k, meter in me.meters.items()}, me.iter_time.time_preds(max_it - (g_it + 1) + (args.ep - ep) * 15)  # +15: other cost
 
 
