@@ -364,13 +364,14 @@ def init_dist_and_get_args():
     # -----------------------------------------------------------------
 
     # 1. 定义路径变量 (请修改这里)
-    local_out_path = "./output/checkpoints"
+    local_out_path = "./outputs"
     bed_path = "/picassox/oss-picassox-train-release/segmentation/intern_segmentation/dc1/models/Foundation/Infinity"
     data_path = "/picassox/intelligent-cpfs/segmentation/intern_segmentation/dc1/Infinity/data/Asker9527/Remote_Sense_Datasets/DIOR/train"
     val_data_path = "/picassox/intelligent-cpfs/segmentation/intern_segmentation/dc1/Infinity/data/Asker9527/Remote_Sense_Datasets/DIOR/test"
     video_data_path = ""
-    exp_name = "debug_experiment022502"
+    exp_name = "debug_experiment022611"
     bed_path = os.path.join(bed_path, exp_name)
+    local_out_path = os.path.join(local_out_path, exp_name)
 
     # 2. 覆盖 args 参数
     args.ep = 2

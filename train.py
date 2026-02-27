@@ -273,7 +273,10 @@ def build_dataloaders(args):
     vbs = round(args.batch_size * 1.5)
     print(f"{args.batch_size=}, {vbs=}", flush=True)
     ld_val = math.ceil(50000 / vbs)
-    ld_train = DataLoader(dataset=dataset_train, num_workers=args.workers, pin_memory=True, generator=args.get_different_generator_for_each_rank(), batch_size=args.batch_size, prefetch_factor=args.prefetch_factor)
+    ld_train = DataLoader(dataset=dataset_train, num_workers=args.workers, pin_memory=True, 
+                          generator=args.get_different_generator_for_each_rank(), 
+                          batch_size=args.batch_size, prefetch_factor=args.prefetch_factor,
+                          shuffle=True, drop_last=True)
     iters_train = len(ld_train)
     print(f'len(dataloader): {len(ld_train)}, len(dataset): {len(dataset_train)}')
     print(f'[dataloader] gbs={args.glb_batch_size}, lbs={args.batch_size}, iters_train={iters_train}, type(train_set)={type_train_set}')
@@ -431,7 +434,7 @@ def main_train(args: arg_util.Args):
     print(f'  [*] [PT finished]  Total Time: {total_time},   Lm: {min_L_mean:.3f} ({L_mean}),   Lt: {min_L_tail:.3f} ({L_tail})')
     print('\n\n')
     
-    del stats, iters_train, ld_train, visualizer
+    del stats, iters_train, ld_train
     time.sleep(3), gc.collect(), torch.cuda.empty_cache(), time.sleep(3)
     return
 
@@ -486,6 +489,10 @@ def train_one_ep(
             with maybe_record_function('before_train'):
                 # [get data]
                 inp, captions = data
+                # check data randomness and accuracy
+                if it -start_it < 5:
+                    print(f'[data caption]{captions}')
+
                 tokens = text_tokenizer(text=captions, max_length=text_tokenizer.model_max_length, padding='max_length', truncation=True, return_tensors='pt')  # todo: put this into dataset
                 input_ids = tokens.input_ids.cuda(non_blocking=True)
                 mask = tokens.attention_mask.cuda(non_blocking=True)

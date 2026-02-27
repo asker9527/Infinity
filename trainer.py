@@ -213,6 +213,12 @@ class InfinityTrainer(object):
             else:
                 lw = 1. / self.seq_len
             loss = loss.mul(lw).sum(dim=-1).mean()
+
+            if g_it % 10 ==0:
+                from tools.diy_tools import draw_gernerated_image
+                # if dist.get_rank() == 0:
+                with torch.no_grad():
+                    draw_gernerated_image(self, logits_BLV[:8],inp_B3HW[:8] ,vae_scale_schedule, g_it,args.local_out_path)
         
         # [backward]
         grad_norm_t, scale_log2_t = self.gpt_opt.backward_clip_step(ep=ep, it=it, g_it=g_it, stepping=stepping, logging_params=logging_params, loss=loss, clip_decay_ratio=clip_decay_ratio, stable=args.stable)
