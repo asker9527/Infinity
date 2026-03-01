@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import os
+from typing import Dict
+
+import pandas as pd
+from torchvision import datasets
+
+from infinity.dataset.RS_datasets import get_class2label
+
+
+def infer_dataset_name(train_path: str) -> str:
+    path = train_path.lower()
+    if "dior" in path:
+        return "dior"
+    if "dota" in path:
+        return "dota"
+    if "fgsc" in path:
+        return "fgsc23"
+    raise ValueError(f"Cannot infer dataset name from train path: {train_path}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Build train class count CSV from ImageFolder directory.")
+    parser.add_argument("--train_path", type=str, required=True)
+    parser.add_argument("--out_csv", type=str, required=True)
+    args = parser.parse_args()
+
+    dataset_name = infer_dataset_name(args.train_path)
+    class2label = get_class2label(dataset_name)  # class_name -> class_id
+
+    ds = datasets.ImageFolder(root=args.train_path)
+    counts_by_name: Dict[str, int] = {name: 0 for name in ds.classes}
+    for _, idx in ds.samples:
+        cls_name = ds.classes[idx]
+        counts_by_name[cls_name] = counts_by_name.get(cls_name, 0) + 1
+
+    rows = []
+    for class_name, class_id in sorted(class2label.items(), key=lambda kv: kv[1]):
+        rows.append(
+            {
+                "class_id": int(class_id),
+                "class_name": class_name,
+                "train_count": int(counts_by_name.get(class_name, 0)),
+            }
+        )
+
+    out_dir = os.path.dirname(os.path.abspath(args.out_csv))
+    os.makedirs(out_dir, exist_ok=True)
+    pd.DataFrame(rows).to_csv(args.out_csv, index=False)
+    print(f"[DONE] {args.out_csv}")
+
+
+if __name__ == "__main__":
+    main()

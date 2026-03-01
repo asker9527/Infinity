@@ -106,6 +106,7 @@ def gen_one_img(
     g_seed=None,
     sampling_per_bits=1,
     enable_positive_prompt=0,
+    return_all_scales=False,
 ):
     sstt = time.time()
     if not isinstance(cfg_list, list):
@@ -124,7 +125,7 @@ def gen_one_img(
 
     with torch.cuda.amp.autocast(enabled=True, dtype=torch.bfloat16, cache_enabled=True):
         stt = time.time()
-        _, _, img_list = infinity_test.autoregressive_infer_cfg(
+        _, idx_Bld_list, img_list = infinity_test.autoregressive_infer_cfg(
             vae=vae,
             scale_schedule=scale_schedule,
             label_B_or_BLT=text_cond_tuple, src_img_features=None, g_seed=g_seed,
@@ -138,8 +139,38 @@ def gen_one_img(
             sampling_per_bits=sampling_per_bits,
         )
     print(f"cost: {time.time() - sstt}, infinity cost={time.time() - stt}")
-    img = img_list[0]
-    return img
+    final_img = img_list[0]
+
+    if not return_all_scales:
+        return final_img
+
+    # Decode progressive multi-scale images from idx_Bld_list using one generation pass.
+    if vae_type == 0:
+        return {"final_img": final_img, "scale_imgs": [final_img]}
+
+    if infinity_test.apply_spatial_patchify:
+        vae_scale_schedule = [(pt, 2 * ph, 2 * pw) for pt, ph, pw in scale_schedule]
+    else:
+        vae_scale_schedule = scale_schedule
+
+    summed_codes = 0
+    scale_imgs = []
+    num_stages_minus_1 = len(vae_scale_schedule) - 1
+    for si, idx_Bld in enumerate(idx_Bld_list):
+        codes = vae.quantizer.lfq.indices_to_codes(idx_Bld, label_type='bit_label')
+        if si != num_stages_minus_1:
+            summed_codes += F.interpolate(codes, size=vae_scale_schedule[-1], mode=vae.quantizer.z_interplote_up)
+        else:
+            summed_codes += codes
+        img_si = vae.decode(summed_codes.squeeze(-3))
+        img_si = (img_si + 1) / 2
+        img_si = img_si.permute(0, 2, 3, 1).mul_(255).to(torch.uint8).flip(dims=(3,))
+        scale_imgs.append(img_si[0])
+
+    return {
+        "final_img": final_img,
+        "scale_imgs": scale_imgs,
+    }
 
 def get_prompt_id(prompt):
     md5 = hashlib.md5()
