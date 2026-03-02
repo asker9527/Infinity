@@ -265,7 +265,7 @@ def build_dataloaders(args):
             load_vae_instead_of_image=False
         )
     elif args.task_type in ('RS', 'remote'):
-        dataset_train, _ = get_RS_datasets(train_path=args.data_path)
+        dataset_train, _ = get_RS_datasets(args, train_path=args.data_path)
         # dataset_train, dataset_val = get_RS_datasets(train_path=args.data_path, test_path=args.val_data_path)
     else:
         raise NotImplementedError(f'args.task_type={args.task_type} not supported')
@@ -494,8 +494,8 @@ def train_one_ep(
                     print(f'[data caption]{captions}')
 
                 tokens = text_tokenizer(text=captions, max_length=text_tokenizer.model_max_length, padding='max_length', truncation=True, return_tensors='pt')  # todo: put this into dataset
-                input_ids = tokens.input_ids.cuda(non_blocking=True)
-                mask = tokens.attention_mask.cuda(non_blocking=True)
+                input_ids = tokens.input_ids.cuda(device=args.device, non_blocking=True)
+                mask = tokens.attention_mask.cuda(device=args.device, non_blocking=True)
                 text_features = text_encoder(input_ids=input_ids, attention_mask=mask)['last_hidden_state'].float()
                 
                 lens: List[int] = mask.sum(dim=-1).tolist()

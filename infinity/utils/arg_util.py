@@ -16,6 +16,8 @@ import infinity.utils.dist as dist
 
 
 class Args(Tap):
+    # DIY
+    debug: bool = True                  # whether to turn on debug mode, which would enable anomaly detection and other features to help debugging
     local_out_path: str = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'local_output')  # directory for save checkpoints
     data_path: str = ''                 # dataset
     bed: str = ''                       # bed directory for copy checkpoints apart from local_out_path
@@ -374,60 +376,61 @@ def init_dist_and_get_args():
     local_out_path = os.path.join(local_out_path, exp_name)
 
     # 2. 覆盖 args 参数
-    args.ep = 2
-    args.opt = 'adamw'
-    args.cum = 3
-    args.sche = 'lin0'
-    args.fp16 = 2
-    args.ada = '0.9_0.97'  # 保持字符串格式
-    args.tini = -1
-    args.tclip = 5
-    args.flash = 0
-    args.alng = 5e-06
-    args.saln = 1
-    args.cos = 1
-    args.enable_checkpointing = 'full-block'
-    args.local_out_path = local_out_path
-    args.task_type = 'RS'
-    args.bed = bed_path
-    args.data_path = data_path
-    args.val_data_path = val_data_path
-    args.video_data_path = video_data_path
-    args.exp_name = exp_name
-    args.tblr = 6e-5
-    args.pn = '0.06M'      # 这种带单位的通常是字符串处理
-    args.model = '2bc8'
-    args.lbs = 64
-    args.workers = 8
-    args.short_cap_prob = 0.5
-    args.online_t5 = 1
-    args.use_streaming_dataset = 1  # 对应命令行中的 1
-    args.iterable_data_buffersize = 30000
-    args.Ct5 = 2048
-    args.t5_path = '/picassox/oss-picassox-train-release/segmentation/intern_segmentation/dc1/models/google/flan-t5-xl'
-    args.vae_type = 32
-    args.vae_ckpt = '/picassox/oss-picassox-train-release/segmentation/intern_segmentation/dc1/models/FoundationVision/Infinity/infinity_vae_d32.pth'
-    args.wp = 0.00000001
-    args.wpe = 1
-    args.dynamic_resolution_across_gpus = 1
-    args.enable_dynamic_length_prompt = 1
-    args.reweight_loss_by_scale = 1
-    args.add_lvl_embeding_only_first_block = 1
-    args.rope2d_each_sa_layer = 1
-    args.rope2d_normalized_by_hw = 2
-    args.use_fsdp_model_ema = 0
-    args.always_training_scales = 100
-    args.use_bit_label = 1
-    args.zero = 0
-    args.save_model_iters_freq = 100
-    args.log_freq = 50
-    args.checkpoint_type = 'torch'
-    args.prefetch_factor = 16
-    args.noise_apply_strength = 0.3
-    args.noise_apply_layers = 13
-    args.apply_spatial_patchify = 0
-    args.use_flex_attn = False    # 命令行是 True, 设为True会导致CUDA error
-    args.pad = 128
+    if args.debug:
+        args.ep = 2
+        args.opt = 'adamw'
+        args.cum = 3
+        args.sche = 'lin0'
+        args.fp16 = 2
+        args.ada = '0.9_0.97'  # 保持字符串格式
+        args.tini = -1
+        args.tclip = 5
+        args.flash = 0
+        args.alng = 5e-06
+        args.saln = 1
+        args.cos = 1
+        args.enable_checkpointing = 'full-block'
+        args.local_out_path = local_out_path
+        args.task_type = 'RS'
+        args.bed = bed_path
+        args.data_path = data_path
+        args.val_data_path = val_data_path
+        args.video_data_path = video_data_path
+        args.exp_name = exp_name
+        args.tblr = 6e-5
+        args.pn = '0.06M'      # 这种带单位的通常是字符串处理
+        args.model = '2bc8'
+        args.lbs = 64
+        args.workers = 8
+        args.short_cap_prob = 0.5
+        args.online_t5 = 1
+        args.use_streaming_dataset = 1  # 对应命令行中的 1
+        args.iterable_data_buffersize = 30000
+        args.Ct5 = 2048
+        args.t5_path = '/picassox/oss-picassox-train-release/segmentation/intern_segmentation/dc1/models/google/flan-t5-xl'
+        args.vae_type = 32
+        args.vae_ckpt = '/picassox/oss-picassox-train-release/segmentation/intern_segmentation/dc1/models/FoundationVision/Infinity/infinity_vae_d32.pth'
+        args.wp = 0.00000001
+        args.wpe = 1
+        args.dynamic_resolution_across_gpus = 1
+        args.enable_dynamic_length_prompt = 1
+        args.reweight_loss_by_scale = 1
+        args.add_lvl_embeding_only_first_block = 1
+        args.rope2d_each_sa_layer = 1
+        args.rope2d_normalized_by_hw = 2
+        args.use_fsdp_model_ema = 0
+        args.always_training_scales = 100
+        args.use_bit_label = 1
+        args.zero = 0
+        args.save_model_iters_freq = 100
+        args.log_freq = 50
+        args.checkpoint_type = 'torch'
+        args.prefetch_factor = 16
+        args.noise_apply_strength = 0.3
+        args.noise_apply_layers = 13
+        args.apply_spatial_patchify = 0
+        args.use_flex_attn = False    # 命令行是 True, 设为True会导致CUDA error
+        args.pad = 128
 
     # -----------------------------------------------------------------
 
