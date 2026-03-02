@@ -53,7 +53,7 @@ export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 wandb login --relogin 711f941f459be2c398272020e434baaf9bb1b2e7
 wandb online  # 将 W&B 切到离线模式（不需要登录，不上传；本地生成 wandb/ 目录）
 
-exp_name=FGSC_022816
+exp_name=FGSC_030214
 bed_path=checkpoints/${exp_name}/
 model_path=/picassox/oss-picassox-train-release/segmentation/intern_segmentation/dc1/models
 data_path=/picassox/intelligent-cpfs/segmentation/intern_segmentation/dc1/Infinity/data/Asker9527/Remote_Sense_Datasets/FGSC/train
@@ -90,10 +90,10 @@ train.py \
 --data_path=${data_path} \
 --video_data_path=${video_data_path} \
 --exp_name=${exp_name} \
---tblr=6e-5 \
+--tblr=6e-3 \
 --pn 0.06M \
---model=2bc8 \
---lbs=64 \
+--model=layer12 \
+--lbs=32 \
 --workers=8 \
 --short_cap_prob 0.5 \
 --online_t5=1 \
@@ -101,10 +101,10 @@ train.py \
 --iterable_data_buffersize 30000 \
 --Ct5=2048 \
 --t5_path=$model_path/google/flan-t5-xl \
---vae_type 32 \
---vae_ckpt=$model_path/FoundationVision/Infinity/infinity_vae_d32.pth \
---wp 0.0000001 \
---wpe 1 \
+--vae_type 16 \
+--vae_ckpt=$model_path/FoundationVision/Infinity/infinity_vae_d16.pth \
+--wp 0.01 \
+--wpe 0.01 \
 --dynamic_resolution_across_gpus 1 \
 --enable_dynamic_length_prompt 1 \
 --reweight_loss_by_scale 1 \

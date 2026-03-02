@@ -4,10 +4,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from pathlib import Path
 from typing import Dict, List, Tuple
 
 import pandas as pd
-
+import sys
+PROJECT_ROOT = Path(__file__).resolve().parents[1]  # .../Infinity
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+    
 from infinity.dataset.RS_datasets import get_class2label
 from infinity.utils.downstream_metrics import (
     build_head_tail_split,

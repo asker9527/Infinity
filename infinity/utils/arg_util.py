@@ -165,7 +165,6 @@ class Args(Tap):
     ############################  Attention! The following arguments and configurations are set automatically, you can skip reading the following part ###############################
     ############################  Attention! The following arguments and configurations are set automatically, you can skip reading the following part ###############################
 
-
     # would be automatically set in runtime
     branch: str = subprocess.check_output(f'git symbolic-ref --short HEAD 2>/dev/null || git rev-parse HEAD', shell=True).decode('utf-8').strip() or '[unknown]' # [automatically set; don't specify this]
     commit_id: str = '' # subprocess.check_output(f'git rev-parse HEAD', shell=True).decode('utf-8').strip() or '[unknown]'  # [automatically set; don't specify this]
@@ -374,6 +373,10 @@ def init_dist_and_get_args():
     exp_name = "debug_experiment022611"
     bed_path = os.path.join(bed_path, exp_name)
     local_out_path = os.path.join(local_out_path, exp_name)
+
+    if args.model=='layer12':
+        args.rush_resume = '/picassox/oss-picassox-train-release/segmentation/intern_segmentation/dc1/models/FoundationVision/Infinity/infinity_125M_256x256.pth'
+    
 
     # 2. 覆盖 args 参数
     if args.debug:
