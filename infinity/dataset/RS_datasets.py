@@ -48,49 +48,6 @@ class ResizeAndPad:
         
         return img
 
-image_size=256
-crop_size=448
-resize_size=512
-# train_transform = transforms.Compose(
-#             [
-#                 transforms.Resize((image_size, image_size)),
-#                 # transforms.RandomCrop(crop_size, padding=8),
-#                 # transforms.Resize((resize_size, resize_size)),
-#                 # transforms.RandomHorizontalFlip(),
-#                 transforms.ToTensor(),
-#                 transforms.Lambda(lambda x: x.mul(2).add(-1)), # [0, 1] -> [-1, 1]
-#             ]
-#         )
-
-image_size = 256
-
-train_transform = transforms.Compose([
-    # 替换原本的强行拉伸 Resize，使用等比例缩放+填充
-    # 提示：在遥感中，使用 'reflect' (镜像填充) 往往比填黑边 ('constant') 效果更好，可以避免黑边在卷积时产生的明显边缘突变。
-    ResizeAndPad(target_size=image_size, padding_mode='reflect'), 
-    
-    # --- 强烈建议加入的遥感专属数据增强 ---
-    transforms.RandomHorizontalFlip(p=0.5), # 随机水平翻转
-    transforms.RandomVerticalFlip(p=0.5),   # 随机垂直翻转
-    transforms.RandomChoice([               # 随机旋转 90/180/270 度
-        transforms.RandomRotation((90, 90)),
-        transforms.RandomRotation((180, 180)),
-        transforms.RandomRotation((270, 270)),
-    ]),
-    # -----------------------------------
-    
-    transforms.ToTensor(),
-    transforms.Lambda(lambda x: x.mul(2).add(-1)), # 归一化到 [-1, 1]
-])
-
-test_transform = transforms.Compose(
-    [
-        transforms.Resize((image_size, image_size)),
-        # transforms.CenterCrop((crop_size, crop_size)),
-        transforms.ToTensor(),
-        transforms.Lambda(lambda x: x.mul(2).add(-1)),
-    ]
-)
 
 def joint_transform(src_img, is_train=True):
     """联合变换：确保 src 和 tgt 经历完全相同的形变、裁剪和翻转"""
@@ -106,13 +63,6 @@ def joint_transform(src_img, is_train=True):
     
     src_img = src_img.resize((resized_width, resized_height), resample=PImage.LANCZOS)
 
-    # 2. 联合裁剪 (Joint Crop)
-    # if is_train:
-    #     # 随机裁剪：生成相同的随机裁剪坐标
-    #     crop_y = random.randint(0, max(0, resized_height - tgt_h))
-    #     crop_x = random.randint(0, max(0, resized_width - tgt_w))
-    # else:
-    #     # 中心裁剪 (原版逻辑)
     crop_y = (resized_height - tgt_h) // 2
     crop_x = (resized_width - tgt_w) // 2
 
@@ -215,29 +165,76 @@ class ImageTextFolder(datasets.ImageFolder):
     
     def __getitem__(self, index):
         img, target = super().__getitem__(index)
-        target = self.classes[target]
+        # print(f"原始标签索引: {target}")
+        target = self.classes[int(target)]
+        # print(self.classes)
 
         # 获取类别名称，并将下划线替换为空格以便更符合自然语言
         class2label = get_class2label(self.dataset_name)  # 替换为你的数据集名称
+        # print(class2label)
         label2class = {v: k for k, v in class2label.items()}
-        class_name = label2class[target]
+        class_name = label2class[int(target)]
         text = f"A image of a {class_name}."
         return img, text
     
-def get_RS_datasets(train_path=None, test_path=None):
-    if 'DIOR' in train_path or 'DIOR' in test_path:
-        dataset_name = 'dior'
-    elif 'DOTA' in train_path or 'DOTA' in test_path:
-        dataset_name = 'dota'
-    elif 'FGSC23' in train_path or 'FGSC23' in test_path:
-        dataset_name = 'fgsc23'
+def get_RS_datasets(args, train_path=None, test_path=None):
 
+    if args.pn == '0.06M':
+        image_size = 256
+    elif args.pn == '0.25M':
+        image_size = 512
+    elif args.pn == '1M':
+        image_size = 1024
+    else:
+        raise ValueError(f"Unsupported parameter pn: {args.pn}. Expected one of ['0.06M', '0.25M', '1M'].")
+
+    train_transform = transforms.Compose([
+        # 替换原本的强行拉伸 Resize，使用等比例缩放+填充
+        # 提示：在遥感中，使用 'reflect' (镜像填充) 往往比填黑边 ('constant') 效果更好，可以避免黑边在卷积时产生的明显边缘突变。
+        ResizeAndPad(target_size=image_size, padding_mode='reflect'), 
+        
+        # # --- 强烈建议加入的遥感专属数据增强 ---
+        # transforms.RandomHorizontalFlip(p=0.5), # 随机水平翻转
+        # transforms.RandomVerticalFlip(p=0.5),   # 随机垂直翻转
+        # transforms.RandomChoice([               # 随机旋转 90/180/270 度
+        #     transforms.RandomRotation((90, 90)),
+        #     transforms.RandomRotation((180, 180)),
+        #     transforms.RandomRotation((270, 270)),
+        # ]),
+        # -----------------------------------
+        
+        transforms.ToTensor(),
+        transforms.Lambda(lambda x: x.mul(2).add(-1)), # 归一化到 [-1, 1]
+    ])
+
+    test_transform = transforms.Compose(
+        [
+            transforms.Resize((image_size, image_size)),
+            # transforms.CenterCrop((crop_size, crop_size)),
+            transforms.ToTensor(),
+            transforms.Lambda(lambda x: x.mul(2).add(-1)),
+        ]
+    )
     if train_path:
+        if 'DIOR' in train_path:
+            dataset_name = 'dior'
+        elif 'DOTA' in train_path:
+            dataset_name = 'dota'
+        elif 'FGSC' in train_path:
+            dataset_name = 'fgsc23'
+
         train_dataset = ImageTextFolder(root=train_path, transform=train_transform)
         train_dataset.set_dataset_name(dataset_name)
     else:
         train_dataset = None
+
     if test_path:
+        if 'DIOR' in test_path:
+            dataset_name = 'dior'
+        elif 'DOTA' in test_path:
+            dataset_name = 'dota'
+        elif 'FGSC' in test_path:
+            dataset_name = 'fgsc23'
         test_dataset = ImageTextFolder(root=test_path, transform=test_transform)
         test_dataset.set_dataset_name(dataset_name)
     else:        
@@ -250,7 +247,8 @@ def get_RS_datasets(train_path=None, test_path=None):
 if __name__ == "__main__":
     train_path = "/picassox/intelligent-cpfs/segmentation/intern_segmentation/dc1/Infinity/data/Asker9527/Remote_Sense_Datasets/DIOR/train"
     test_path = "/picassox/intelligent-cpfs/segmentation/intern_segmentation/dc1/Infinity/data/Asker9527/Remote_Sense_Datasets/DIOR/test"
-    train_dataset, test_dataset = get_RS_datasets(train_path, test_path)
+    args = type('Args', (object,), {'pn': '0.25M'})()  # 创建一个简单的对象来模拟 args
+    train_dataset, test_dataset = get_RS_datasets(args, train_path, test_path)
     print("train dataset size:", len(train_dataset))
     print("test dataset size:", len(test_dataset))
     train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True)

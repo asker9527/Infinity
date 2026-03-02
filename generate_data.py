@@ -85,17 +85,17 @@ if __name__ == "__main__":
     test_path = f"{base_dir}/Infinity/data/Asker9527/Remote_Sense_Datasets/DIOR/test"
     synthetic_save_base = f"/picassox/intelligent-cpfs/segmentation/intern_segmentation/dc1/Infinity/outputs/Remote_Sense_Datasets/DIOR_Synthetic"
     
-    # 1. 加载数据
-    train_dataset, test_dataset = get_RS_datasets(train_path, test_path)
-    print("train dataset size:", len(train_dataset))
-    print("test dataset size:", len(test_dataset))
-    train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True)
-
-    # 2. 加载模型
+    # 1. 加载模型
     personal_data_path = '/picassox/oss-picassox-train-release/segmentation/intern_segmentation/dc1'
     sft_models_path = '/picassox/intelligent-cpfs/segmentation/intern_segmentation/dc1/Infinity/outputs/debug_experiment022611/ar-ckpt-giter000K-ep0-iter900-last.pth'
     sft_models_path='/picassox/oss-picassox-train-release/segmentation/intern_segmentation/dc1/models/FoundationVision/Infinity/infinity_125M_256x256.pth'
     vae, infinity, text_tokenizer, text_encoder, args = get_models(personal_data_path, sft_models_path, config=None)
+
+    # 2. 加载数据
+    train_dataset, test_dataset = get_RS_datasets(args, train_path, test_path)
+    print("train dataset size:", len(train_dataset))
+    print("test dataset size:", len(test_dataset))
+    train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True)
 
     # 3. 确定生成数据的参数
     # 假设 get_class2label 返回如 {0: 'airplane', 1: 'airport', ...}
