@@ -1,171 +1,596 @@
 """
-利用VAR生成数据，增强训练数据的多样性。
-生成是批量生成，将数据的后n个Scale用于增强，一次生成B*n个数据。
+Generate synthetic remote-sensing images with Infinity VAR.
+
+New features:
+1) Dynamic class budget by model uncertainty entropy (budget_mode=entropy_dynamic)
+2) Multi-scale candidate selection in one VAR generation pass
 """
+from __future__ import annotations
+
+import argparse
+import json
+import math
 import os
 import random
+import re
+import time
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Sequence, Tuple
+
+import numpy as np
+import pandas as pd
 import torch
-from torchvision.utils import save_image  # 引入保存图片的工具
-from tools.run_infinity import *
+import torch.nn.functional as F
+from PIL import Image
+from torchvision import datasets as tv_datasets
+from torchvision import models, transforms
+
 from tools.diy_tools import get_models
+from tools.run_infinity import dynamic_resolution_h_w, gen_one_img, h_div_w_templates
 from infinity.dataset.RS_datasets import get_RS_datasets, get_class2label
-from torch.utils.data import DataLoader
 
-def set_number_of_samples_per_class(nums_per_class, strategy='balance', target_num=500, fixed_add=100):
-    """
-    基于样本分布，设置每个类别的生成样本数量。
-    :param nums_per_class: 每个类别的当前样本数量列表。
-    :param strategy: 增强策略 ('balance' 长尾平衡 / 'fixed' 固定增加)
-    :param target_num: balance策略下，期望每个类别达到的目标总数
-    :param fixed_add: fixed策略下，每个类别固定增加的数量
-    :return: 长度与类别数相同的列表，表示每个类别需要生成的数量
-    """
-    if strategy == 'balance':
-        # 将所有类别的样本数补充到 target_num，如果已经超过则不生成 (0)
-        return [max(0, target_num - num) for num in nums_per_class]
-    elif strategy == 'fixed':
-        # 每个类别固定增加 fixed_add 个样本
-        return [fixed_add for _ in nums_per_class]
-    else:
-        raise ValueError("Unsupported strategy")
 
-class generated_data_filter():
-    """
-    对生成的数据进行过滤，确保其质量。
-    :param mode: 过滤模式 ('full', 'clip_similarity', 'uncertainty')
-    """
-    def __init__(self, mode='full', similarity_threshold=0.25):
+def set_number_of_samples_per_class(
+    nums_per_class: Sequence[int],
+    strategy: str = "balance",
+    target_num: int = 500,
+    fixed_add: int = 100,
+    ratio: float = 1.0,
+) -> List[int]:
+    if strategy == "balance":
+        return [max(0, target_num - int(num)) for num in nums_per_class]
+    if strategy == "fixed":
+        return [max(0, int(fixed_add)) for _ in nums_per_class]
+    if strategy == "ratio":
+        return [max(0, int(math.ceil(num * ratio))) for num in nums_per_class]
+    raise ValueError(f"Unsupported strategy: {strategy}")
+
+
+def infer_dataset_name(train_path: str, test_path: str) -> str:
+    merged = f"{train_path}|{test_path}".lower()
+    if "dior" in merged:
+        return "dior"
+    if "dota" in merged:
+        return "dota"
+    if "fgsc" in merged:
+        return "fgsc23"
+    raise ValueError(f"Cannot infer dataset name from paths: {train_path}, {test_path}")
+
+
+def sanitize_filename(name: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9._-]+", "_", name).strip("_")
+
+
+def tensor_hwc_to_uint8_hwc(image: torch.Tensor) -> np.ndarray:
+    arr = image.detach().cpu().numpy()
+    if arr.dtype != np.uint8:
+        arr = np.clip(arr, 0, 255).astype(np.uint8)
+    if arr.ndim != 3 or arr.shape[2] != 3:
+        raise ValueError(f"Unexpected generated image shape: {arr.shape}")
+    return arr
+
+
+class EnsembleClassifier:
+    def __init__(
+        self,
+        ckpt_paths: Sequence[str],
+        num_classes: int,
+        device: str = "cuda",
+        model_name: str = "resnet50",
+    ):
+        if not ckpt_paths:
+            raise ValueError("Classifier checkpoints are required.")
+        self.device = torch.device(device if torch.cuda.is_available() else "cpu")
+        self.models = [self._load_one(path, num_classes, model_name) for path in ckpt_paths]
+        self.num_classes = num_classes
+        self.preprocess = transforms.Compose(
+            [
+                transforms.ToPILImage(),
+                transforms.Resize((256, 256)),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
+            ]
+        )
+
+    def _build_model(self, model_name: str, num_classes: int) -> torch.nn.Module:
+        if model_name == "resnet50":
+            model = models.resnet50(weights=None)
+            model.fc = torch.nn.Linear(model.fc.in_features, num_classes)
+            return model
+        if model_name == "resnet18":
+            model = models.resnet18(weights=None)
+            model.fc = torch.nn.Linear(model.fc.in_features, num_classes)
+            return model
+        raise ValueError(f"Unsupported classifier model: {model_name}")
+
+    def _load_one(self, ckpt_path: str, num_classes: int, model_name: str) -> torch.nn.Module:
+        model = self._build_model(model_name, num_classes)
+        ckpt = torch.load(ckpt_path, map_location="cpu")
+        if isinstance(ckpt, dict) and "state_dict" in ckpt:
+            ckpt = ckpt["state_dict"]
+        elif isinstance(ckpt, dict) and "model" in ckpt:
+            ckpt = ckpt["model"]
+        clean = {}
+        for k, v in ckpt.items():
+            nk = k[7:] if k.startswith("module.") else k
+            clean[nk] = v
+        model.load_state_dict(clean, strict=False)
+        model.eval().to(self.device)
+        return model
+
+    @torch.no_grad()
+    def predict_probs(self, image_hwc_uint8: np.ndarray) -> torch.Tensor:
+        x = self.preprocess(image_hwc_uint8).unsqueeze(0).to(self.device)
+        probs = []
+        for model in self.models:
+            logits = model(x)
+            probs.append(F.softmax(logits, dim=1))
+        return torch.cat(probs, dim=0)  # [T, K]
+
+
+@dataclass
+class FilterThresholds:
+    confidence_min: float = 0.50
+    entropy_max: float = 0.80
+    disagreement_max: float = 0.20
+
+
+class GeneratedDataFilter:
+    def __init__(
+        self,
+        mode: str,
+        thresholds: FilterThresholds,
+        classifier: Optional[EnsembleClassifier] = None,
+    ):
         self.mode = mode
-        self.similarity_threshold = similarity_threshold
+        self.thresholds = thresholds
+        self.classifier = classifier
+        if self.mode != "full" and self.classifier is None:
+            raise ValueError(f"Mode '{self.mode}' requires classifier checkpoints.")
 
-    def filter(self, generated_image, prompt):
-        """
-        根据提示词和生成的图像进行过滤。返回 True 表示保留，False 表示丢弃。
-        """
-        if self.mode == 'full':
-            return True  # 修正：'full' 模式应该默认通过，而不是 False
+    @torch.no_grad()
+    def evaluate(self, image_hwc_uint8: np.ndarray, target_idx: int) -> Dict[str, float]:
+        if self.mode == "full":
+            return {
+                "accepted": 1.0,
+                "pred_idx": float(target_idx),
+                "confidence": 1.0,
+                "entropy": 0.0,
+                "disagreement": 0.0,
+                "reason": "full_pass",
+            }
 
-        elif self.mode == 'uncertainty':
-            # TODO: 替换为实际的分类模型推理代码
-            predicted_label = "dummy_label" # classify_image(generated_image)
-            if predicted_label != prompt:
-                return False
+        probs_tk = self.classifier.predict_probs(image_hwc_uint8)  # [T, K]
+        p_bar = probs_tk.mean(dim=0)
+        pred_idx = int(torch.argmax(p_bar).item())
+        confidence = float(torch.max(p_bar).item())
+        eps = 1e-8
+        entropy = float((-(p_bar * torch.log(p_bar + eps)).sum() / math.log(p_bar.numel())).item())
+        kls = []
+        for t in range(probs_tk.shape[0]):
+            p_t = probs_tk[t]
+            kl = torch.sum(p_t * (torch.log(p_t + eps) - torch.log(p_bar + eps)))
+            kls.append(kl)
+        disagreement = float((torch.stack(kls).mean() / math.log(p_bar.numel())).item())
 
-        elif self.mode == 'clip_similarity':
-            # TODO: 替换为实际的CLIP相似度计算代码
-            similarity_score = 1.0 # compute_clip_similarity(generated_image, prompt)
-            if similarity_score < self.similarity_threshold:
-                return False
-                
-        return True
+        if pred_idx != target_idx:
+            return {
+                "accepted": 0.0,
+                "pred_idx": float(pred_idx),
+                "confidence": confidence,
+                "entropy": entropy,
+                "disagreement": disagreement,
+                "reason": "class_mismatch",
+            }
 
-    def evaluate(self, generated_image, prompt):
-        """
-        计算生成图像的质量分数。
-        """
-        if self.mode == 'uncertainty':
-            # TODO: 替换为实际逻辑
-            predicted_label, uncertainty_score = prompt, 0.1 # classify_image_with_uncertainty(...)
-            if predicted_label != prompt:
-                return 0.0
-            return 1.0 - uncertainty_score
-            
-        elif self.mode == 'clip_similarity':
-            # TODO: 替换为实际逻辑
-            similarity_score = 0.9 # compute_clip_similarity(...)
-            return similarity_score
-            
-        return 1.0 
+        if self.mode == "confidence":
+            ok = confidence >= self.thresholds.confidence_min
+            reason = "pass" if ok else "low_confidence"
+        elif self.mode == "entropy":
+            ok = entropy <= self.thresholds.entropy_max
+            reason = "pass" if ok else "high_entropy"
+        elif self.mode == "joint":
+            ok = (
+                confidence >= self.thresholds.confidence_min
+                and entropy <= self.thresholds.entropy_max
+                and disagreement <= self.thresholds.disagreement_max
+            )
+            if ok:
+                reason = "pass"
+            elif confidence < self.thresholds.confidence_min:
+                reason = "low_confidence"
+            elif entropy > self.thresholds.entropy_max:
+                reason = "high_entropy"
+            else:
+                reason = "high_disagreement"
+        else:
+            raise ValueError(f"Unsupported mode: {self.mode}")
+
+        return {
+            "accepted": float(ok),
+            "pred_idx": float(pred_idx),
+            "confidence": confidence,
+            "entropy": entropy,
+            "disagreement": disagreement,
+            "reason": reason,
+        }
 
 
-if __name__ == "__main__":
-    # 配置路径
-    base_dir = "/picassox/intelligent-cpfs/segmentation/intern_segmentation/dc1"
-    train_path = f"{base_dir}/Infinity/data/Asker9527/Remote_Sense_Datasets/DIOR/train"
-    test_path = f"{base_dir}/Infinity/data/Asker9527/Remote_Sense_Datasets/DIOR/test"
-    synthetic_save_base = f"/picassox/intelligent-cpfs/segmentation/intern_segmentation/dc1/Infinity/outputs/Remote_Sense_Datasets/DIOR_Synthetic"
-    
-    # 1. 加载模型
-    personal_data_path = '/picassox/oss-picassox-train-release/segmentation/intern_segmentation/dc1'
-    sft_models_path = '/picassox/intelligent-cpfs/segmentation/intern_segmentation/dc1/Infinity/outputs/debug_experiment022611/ar-ckpt-giter000K-ep0-iter900-last.pth'
-    sft_models_path='/picassox/oss-picassox-train-release/segmentation/intern_segmentation/dc1/models/FoundationVision/Infinity/infinity_125M_256x256.pth'
-    vae, infinity, text_tokenizer, text_encoder, args = get_models(personal_data_path, sft_models_path, config=None)
+def _allocate_integer_budget(weights: Sequence[float], total_budget: int) -> List[int]:
+    total_budget = int(max(0, total_budget))
+    if total_budget == 0:
+        return [0 for _ in weights]
+    w = np.array(weights, dtype=np.float64)
+    if np.sum(w) <= 0:
+        w = np.ones_like(w)
+    raw = total_budget * w / np.sum(w)
+    flo = np.floor(raw).astype(int)
+    rem = total_budget - int(flo.sum())
+    if rem > 0:
+        frac_order = np.argsort(-(raw - flo))
+        for i in frac_order[:rem]:
+            flo[i] += 1
+    return flo.tolist()
 
-    # 2. 加载数据
-    train_dataset, test_dataset = get_RS_datasets(args, train_path, test_path)
-    print("train dataset size:", len(train_dataset))
-    print("test dataset size:", len(test_dataset))
-    train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True)
 
-    # 3. 确定生成数据的参数
-    # 假设 get_class2label 返回如 {0: 'airplane', 1: 'airport', ...}
-    class2label = get_class2label(train_path.split('/')[-2].lower())  
-    label2class = {v: k for k, v in class2label.items()}  
-    nums_per_class = train_dataset.get_samples_per_class()  
-    
-    # 选择增强策略（这里示例为每个类补充到平衡，或固定加100）
-    add_nums_per_class = set_number_of_samples_per_class(nums_per_class, strategy='fixed', fixed_add=100) 
+def estimate_class_entropy(
+    train_path: str,
+    class2label: Dict[str, int],
+    classifier: EnsembleClassifier,
+    max_samples_per_class: int = 0,
+) -> Dict[int, float]:
+    ds = tv_datasets.ImageFolder(root=train_path)
+    counts_used: Dict[int, int] = {v: 0 for v in class2label.values()}
+    entropy_vals: Dict[int, List[float]] = {v: [] for v in class2label.values()}
+    eps = 1e-8
+    for img_path, ds_idx in ds.samples:
+        class_name = ds.classes[ds_idx]
+        if class_name not in class2label:
+            continue
+        cid = int(class2label[class_name])
+        if max_samples_per_class > 0 and counts_used[cid] >= max_samples_per_class:
+            continue
+        img = np.array(Image.open(img_path).convert("RGB"))
+        probs_tk = classifier.predict_probs(img)
+        p_bar = probs_tk.mean(dim=0)
+        entropy = float((-(p_bar * torch.log(p_bar + eps)).sum() / math.log(p_bar.numel())).item())
+        entropy_vals[cid].append(entropy)
+        counts_used[cid] += 1
+    out = {}
+    for cid, vals in entropy_vals.items():
+        out[cid] = float(np.mean(vals)) if vals else 0.0
+    return out
 
-    # 提取共有参数
-    h_div_w_template_ = h_div_w_templates[np.argmin(np.abs(h_div_w_templates-1.0))]
-    scale_schedule = dynamic_resolution_h_w[h_div_w_template_][args.pn]['scales']
+
+def dynamic_budget_by_entropy(
+    base_add_nums: Sequence[int],
+    nums_per_class: Sequence[int],
+    class_indices: Sequence[int],
+    class_entropy: Dict[int, float],
+    entropy_mix_imbalance: float,
+    entropy_temperature: float,
+    budget_total: int,
+) -> List[int]:
+    max_n = max(max(nums_per_class), 1)
+    scores = []
+    for cid, n in zip(class_indices, nums_per_class):
+        ent = float(class_entropy.get(int(cid), 0.0))
+        imb = (max_n - n) / max_n
+        score = max(1e-8, ent + float(entropy_mix_imbalance) * imb)
+        if entropy_temperature != 1.0:
+            score = score ** (1.0 / max(entropy_temperature, 1e-6))
+        scores.append(score)
+    alloc = _allocate_integer_budget(scores, budget_total)
+    return [max(0, int(x)) for x in alloc]
+
+
+def select_scale_candidate(
+    filter_mode: str,
+    filt_results: List[Dict[str, float]],
+) -> int:
+    accepted_ids = [i for i, r in enumerate(filt_results) if int(r["accepted"]) == 1]
+    if not accepted_ids:
+        return -1
+    if filter_mode == "entropy":
+        return min(accepted_ids, key=lambda i: filt_results[i]["entropy"])
+    if filter_mode == "confidence":
+        return max(accepted_ids, key=lambda i: filt_results[i]["confidence"])
+    if filter_mode == "joint":
+        return max(
+            accepted_ids,
+            key=lambda i: (
+                filt_results[i]["confidence"] - filt_results[i]["entropy"] - filt_results[i]["disagreement"]
+            ),
+        )
+    return accepted_ids[-1]  # full mode defaults to highest scale
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Generate synthetic data for Chapter-5 experiments.")
+    parser.add_argument("--train_path", type=str, required=True)
+    parser.add_argument("--test_path", type=str, required=True)
+    parser.add_argument("--save_dir", type=str, required=True)
+    parser.add_argument("--personal_data_path", type=str, required=True)
+    parser.add_argument("--sft_model_path", type=str, default="")
+    parser.add_argument("--seed", type=int, default=42)
+
+    parser.add_argument("--augment_strategy", type=str, default="fixed", choices=["fixed", "balance", "ratio"])
+    parser.add_argument("--target_num", type=int, default=500)
+    parser.add_argument("--fixed_add", type=int, default=100)
+    parser.add_argument("--ratio", type=float, default=1.0)
+
+    parser.add_argument("--budget_mode", type=str, default="static", choices=["static", "entropy_dynamic"])
+    parser.add_argument("--budget_total", type=int, default=-1)
+    parser.add_argument("--entropy_ckpt", type=str, default="")
+    parser.add_argument("--entropy_mix_imbalance", type=float, default=0.3)
+    parser.add_argument("--entropy_temperature", type=float, default=1.0)
+    parser.add_argument("--entropy_max_samples_per_class", type=int, default=200)
+
+    parser.add_argument("--filter_mode", type=str, default="full", choices=["full", "confidence", "entropy", "joint"])
+    parser.add_argument("--confidence_min", type=float, default=0.50)
+    parser.add_argument("--entropy_max", type=float, default=0.80)
+    parser.add_argument("--disagreement_max", type=float, default=0.20)
+    parser.add_argument("--classifier_ckpts", type=str, default="")
+    parser.add_argument("--classifier_model", type=str, default="resnet50", choices=["resnet18", "resnet50"])
+
+    parser.add_argument("--use_multiscale_candidates", type=int, default=1, choices=[0, 1])
+    parser.add_argument("--max_attempt_factor", type=float, default=5.0)
+    parser.add_argument("--cfg", type=float, default=3.0)
+    parser.add_argument("--tau", type=float, default=1.0)
+    parser.add_argument("--sampling_per_bits", type=int, default=1)
+    parser.add_argument("--overwrite", type=int, default=0, choices=[0, 1])
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+
+    # 1) Dataset and class metadata
+    train_dataset, test_dataset = get_RS_datasets(args.train_path, args.test_path)
+    print(f"[INFO] train size={len(train_dataset)}, test size={len(test_dataset)}")
+
+    dataset_name = infer_dataset_name(args.train_path, args.test_path)
+    class2label = get_class2label(dataset_name)  # {class_name: label_idx}
+    ordered = sorted(class2label.items(), key=lambda kv: kv[1])
+    class_names = [x[0] for x in ordered]
+    class_indices = [int(x[1]) for x in ordered]
+
+    counts_by_name: Dict[str, int] = {name: 0 for name in train_dataset.classes}
+    for _, idx in train_dataset.samples:
+        cls_name = train_dataset.classes[idx]
+        counts_by_name[cls_name] = counts_by_name.get(cls_name, 0) + 1
+    nums_per_class = [int(counts_by_name.get(name, 0)) for name in class_names]
+
+    base_add_nums = set_number_of_samples_per_class(
+        nums_per_class=nums_per_class,
+        strategy=args.augment_strategy,
+        target_num=args.target_num,
+        fixed_add=args.fixed_add,
+        ratio=args.ratio,
+    )
+
+    # 2) Build filter classifier (if needed)
+    classifier = None
+    if args.filter_mode != "full":
+        ckpts = [x.strip() for x in args.classifier_ckpts.split(",") if x.strip()]
+        classifier = EnsembleClassifier(
+            ckpt_paths=ckpts,
+            num_classes=len(class_names),
+            device="cuda",
+            model_name=args.classifier_model,
+        )
+    data_filter = GeneratedDataFilter(
+        mode=args.filter_mode,
+        thresholds=FilterThresholds(
+            confidence_min=args.confidence_min,
+            entropy_max=args.entropy_max,
+            disagreement_max=args.disagreement_max,
+        ),
+        classifier=classifier,
+    )
+
+    # 3) Dynamic budget planning by entropy (Generate What)
+    planner_info = {}
+    add_nums_per_class = list(base_add_nums)
+    if args.budget_mode == "entropy_dynamic":
+        entropy_ckpt = args.entropy_ckpt.strip()
+        if not entropy_ckpt:
+            if not args.classifier_ckpts.strip():
+                raise ValueError("entropy_dynamic requires --entropy_ckpt or --classifier_ckpts.")
+            entropy_ckpt = args.classifier_ckpts.split(",")[0].strip()
+        entropy_classifier = EnsembleClassifier(
+            ckpt_paths=[entropy_ckpt],
+            num_classes=len(class_names),
+            device="cuda",
+            model_name=args.classifier_model,
+        )
+        class_entropy = estimate_class_entropy(
+            train_path=args.train_path,
+            class2label=class2label,
+            classifier=entropy_classifier,
+            max_samples_per_class=max(0, int(args.entropy_max_samples_per_class)),
+        )
+        total_budget = int(sum(base_add_nums)) if args.budget_total <= 0 else int(args.budget_total)
+        add_nums_per_class = dynamic_budget_by_entropy(
+            base_add_nums=base_add_nums,
+            nums_per_class=nums_per_class,
+            class_indices=class_indices,
+            class_entropy=class_entropy,
+            entropy_mix_imbalance=args.entropy_mix_imbalance,
+            entropy_temperature=args.entropy_temperature,
+            budget_total=total_budget,
+        )
+        planner_info = {
+            "class_entropy": {str(k): float(v) for k, v in class_entropy.items()},
+            "base_budget": [int(x) for x in base_add_nums],
+            "dynamic_budget": [int(x) for x in add_nums_per_class],
+            "budget_total": int(total_budget),
+        }
+
+    # 4) Load generative model
+    sft_model_path = args.sft_model_path if args.sft_model_path else None
+    vae, infinity, text_tokenizer, text_encoder, model_args = get_models(
+        personal_data_path=args.personal_data_path,
+        sft_models_path=sft_model_path,
+        config={"sampling_per_bits": args.sampling_per_bits},
+    )
+    h_div_w_template = h_div_w_templates[np.argmin(np.abs(h_div_w_templates - 1.0))]
+    scale_schedule = dynamic_resolution_h_w[h_div_w_template][model_args.pn]["scales"]
     scale_schedule = [(1, h, w) for (_, h, w) in scale_schedule]
-    
-    data_filter = generated_data_filter(mode='uncertainty') # 过滤器只需实例化一次
 
-    # 4. 开始生成数据
-    for class_idx, num_to_generate in enumerate(add_nums_per_class):
+    os.makedirs(args.save_dir, exist_ok=True)
+    all_records: List[Dict[str, object]] = []
+    t_run_start = time.time()
+    global_attempt = 0
+    global_kept = 0
+
+    # 5) Generation loop
+    for class_name, class_idx, num_to_generate, num_original in zip(
+        class_names, class_indices, add_nums_per_class, nums_per_class
+    ):
         if num_to_generate <= 0:
             continue
-        class_name = label2class[class_idx]
-        prompt = f'a photo of a {class_name}'  # 根据实际情况调整提示词格式
-        
-        # 建立类别专属的文件夹，保持与原数据集结构一致
-        class_save_path = os.path.join(synthetic_save_base,str(class_idx))
-        os.makedirs(class_save_path, exist_ok=True)
-
+        prompt = f"a photo of a {class_name}"
+        class_dir = os.path.join(args.save_dir, sanitize_filename(class_name))
+        os.makedirs(class_dir, exist_ok=True)
         valid_count = 0
         attempts = 0
-        max_attempts = num_to_generate * 5  # 设置最大尝试次数，防止过滤器过于严格导致死循环
+        max_attempts = max(1, int(math.ceil(num_to_generate * args.max_attempt_factor)))
+        print(
+            f"[CLASS] {class_name} (label={class_idx}) original={num_original} target_gen={num_to_generate} max_attempts={max_attempts}"
+        )
 
-        # 使用 while 循环确保生成足够数量的合格数据
         while valid_count < num_to_generate and attempts < max_attempts:
             attempts += 1
-            save_filename = os.path.join(class_save_path, f"synth_{valid_count:05d}.jpg")
-            # if os.path.exists(save_filename):
-            #     continue
-            seed = random.randint(0, 1000000)  # 每次生成前随机设置seed，增加多样性
-            # NOTE: 如果此处改为批量生成 (Batch size = B)，请将其替换为 gen_batch_img
-            # 并在下方使用 for img in batch_images: 进行过滤和保存
-            generated_image = gen_one_img(
-                infinity, 
+            global_attempt += 1
+            seed = random.randint(0, 2**31 - 1)
+
+            gen_t0 = time.time()
+            generated = gen_one_img(
+                infinity,
                 vae,
                 text_tokenizer,
                 text_encoder,
                 prompt,
-                g_seed=seed,  # 每次尝试改变seed，保证生成多样性
-                cfg_list=3.0,
-                tau_list=1.0,
+                g_seed=seed,
+                cfg_list=args.cfg,
+                tau_list=args.tau,
                 scale_schedule=scale_schedule,
-                cfg_insertion_layer=[args.cfg_insertion_layer],
-                vae_type=args.vae_type,
-                sampling_per_bits=args.sampling_per_bits,
+                cfg_insertion_layer=[model_args.cfg_insertion_layer],
+                vae_type=model_args.vae_type,
+                sampling_per_bits=model_args.sampling_per_bits,
+                return_all_scales=bool(args.use_multiscale_candidates),
             )
-            
-            # 过滤
-            # if not data_filter.filter(generated_image, prompt):
-            #     continue  
+            gen_cost = time.time() - gen_t0
 
-            # 根据 generated_image 的类型（Tensor 还是 PIL Image）选择保存方式
-            # 假设 gen_one_img 返回的是归一化到 [0, 1] 的 PyTorch Tensor:
-            generated_image_np = generated_image.cpu().numpy()
-            if generated_image_np.shape[2] == 3:  
-                generated_image_np = generated_image_np[..., ::-1]
-            result_image = Image.fromarray(generated_image_np.astype(np.uint8))
-            result_image.save(save_filename)
-            print(f"Saved {save_filename} (Attempt {attempts}, Valid {valid_count + 1}/{num_to_generate})")
-            
-            valid_count += 1
-            
-        if attempts >= max_attempts:
-            print(f"Warning: Reached max attempts for {prompt}. Generated {valid_count}/{num_to_generate}.")
+            # Build candidates: final only OR all scales.
+            if isinstance(generated, dict):
+                scale_imgs = [tensor_hwc_to_uint8_hwc(x) for x in generated["scale_imgs"]]
+                candidate_imgs = scale_imgs
+            else:
+                candidate_imgs = [tensor_hwc_to_uint8_hwc(generated)]
+
+            filt_t0 = time.time()
+            filt_results = [data_filter.evaluate(img, target_idx=class_idx) for img in candidate_imgs]
+            chosen_scale_idx = select_scale_candidate(args.filter_mode, filt_results)
+            filt_cost = time.time() - filt_t0
+
+            chosen = filt_results[chosen_scale_idx] if chosen_scale_idx >= 0 else filt_results[-1]
+            accepted = int(chosen_scale_idx >= 0)
+
+            file_rel = ""
+            if accepted:
+                img_uint8 = candidate_imgs[chosen_scale_idx]
+                filename = f"synth_{valid_count:05d}_seed{seed}_s{chosen_scale_idx}.png"
+                file_path = os.path.join(class_dir, filename)
+                if args.overwrite or not os.path.exists(file_path):
+                    Image.fromarray(img_uint8).save(file_path)
+                file_rel = os.path.relpath(file_path, args.save_dir)
+                valid_count += 1
+                global_kept += 1
+
+            rec = {
+                "global_attempt": global_attempt,
+                "class_name": class_name,
+                "class_idx": class_idx,
+                "prompt": prompt,
+                "seed": seed,
+                "accepted": accepted,
+                "reason": chosen["reason"] if accepted else "all_scales_rejected",
+                "pred_idx": int(chosen["pred_idx"]),
+                "confidence": float(chosen["confidence"]),
+                "entropy": float(chosen["entropy"]),
+                "disagreement": float(chosen["disagreement"]),
+                "chosen_scale_idx": int(chosen_scale_idx),
+                "num_scales": int(len(candidate_imgs)),
+                "gen_time_s": gen_cost,
+                "filter_time_s": filt_cost,
+                "total_time_s": gen_cost + filt_cost,
+                "file_relpath": file_rel,
+            }
+            all_records.append(rec)
+            print(
+                f"  [TRY {attempts}/{max_attempts}] keep={rec['accepted']} scale={rec['chosen_scale_idx']} "
+                f"reason={rec['reason']} conf={rec['confidence']:.4f} H={rec['entropy']:.4f} D={rec['disagreement']:.4f} "
+                f"kept={valid_count}/{num_to_generate}"
+            )
+
+        if attempts >= max_attempts and valid_count < num_to_generate:
+            print(f"[WARN] {class_name}: reached max attempts, generated {valid_count}/{num_to_generate}.")
+
+    # 6) Save statistics
+    df = pd.DataFrame(all_records)
+    records_csv = os.path.join(args.save_dir, "generation_records.csv")
+    df.to_csv(records_csv, index=False)
+
+    summary = {
+        "filter_mode": args.filter_mode,
+        "augment_strategy": args.augment_strategy,
+        "budget_mode": args.budget_mode,
+        "seed": args.seed,
+        "total_attempts": int(global_attempt),
+        "total_kept": int(global_kept),
+        "pass_rate": float(global_kept / max(global_attempt, 1)),
+        "run_time_s": float(time.time() - t_run_start),
+        "mean_gen_time_s": float(df["gen_time_s"].mean()) if len(df) else 0.0,
+        "mean_filter_time_s": float(df["filter_time_s"].mean()) if len(df) else 0.0,
+        "mean_total_time_s": float(df["total_time_s"].mean()) if len(df) else 0.0,
+        "thresholds": {
+            "confidence_min": args.confidence_min,
+            "entropy_max": args.entropy_max,
+            "disagreement_max": args.disagreement_max,
+        },
+        "planner": planner_info,
+    }
+
+    if len(df):
+        cls_grp = df.groupby(["class_name", "class_idx"], as_index=False).agg(
+            attempts=("accepted", "size"),
+            kept=("accepted", "sum"),
+            mean_conf=("confidence", "mean"),
+            mean_entropy=("entropy", "mean"),
+            mean_disagreement=("disagreement", "mean"),
+            mean_scale=("chosen_scale_idx", "mean"),
+            mean_time_s=("total_time_s", "mean"),
+        )
+        cls_grp["pass_rate"] = cls_grp["kept"] / cls_grp["attempts"].clip(lower=1)
+        per_class_csv = os.path.join(args.save_dir, "generation_summary_per_class.csv")
+        cls_grp.to_csv(per_class_csv, index=False)
+        summary["per_class_csv"] = os.path.relpath(per_class_csv, args.save_dir)
+    else:
+        summary["per_class_csv"] = ""
+
+    summary_json = os.path.join(args.save_dir, "generation_summary.json")
+    with open(summary_json, "w", encoding="utf-8") as f:
+        json.dump(summary, f, ensure_ascii=False, indent=2)
+
+    print(f"[DONE] records: {records_csv}")
+    print(f"[DONE] summary: {summary_json}")
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+
+
+if __name__ == "__main__":
+    main()

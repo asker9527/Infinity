@@ -1,5 +1,157 @@
 # Infinity $\infty$: Scaling Bitwise AutoRegressive Modeling for High-Resolution Image Synthesis
 
+## 🚀 新项目版本（Chapter-5）说明
+
+本仓库在原始 Infinity 的基础上，新增了一个面向“长尾遥感分类数据增强”的工程化子项目。  
+核心目标是把“生成更多数据”升级为“生成更有用的数据”，并形成可复现实验闭环。
+
+### 1) 新项目 Idea（双不确定性 + 多尺度闭环）
+
+- 生成什么数据（Generate What）：用模型不确定性（熵）动态分配各类别生成预算。
+- 过滤什么数据（Filter What）：用数据不确定性（多分类器的置信度/熵/分歧）筛选合成样本。
+- 用什么尺度（Scale Selection）：利用 VAR 一次生成多尺度候选图像，按过滤得分自动选优保留。
+- 最终目标：在相同算力预算下提升下游分类器的 `All / Head / Tail` 表现与稳健性。
+
+### 2) 关键新增模块
+
+- `generate_data.py`  
+  生成主入口，支持：
+  - `budget_mode=static|entropy_dynamic`
+  - `filter_mode=full|confidence|entropy|joint`
+  - `use_multiscale_candidates=1`（一次生成多尺度并自动选优）
+- `scripts/run_chap5_generation.sh`  
+  一键跑四组生成实验（full/confidence/entropy/joint），支持动态预算参数。
+- `scripts/one_click_smoke.sh`  
+  零配置一键烟雾测试（静态检查 + 自动探测路径 + 最小运行）。
+- `tools/build_train_count_csv.py`  
+  自动统计训练集类别样本数。
+- `tools/summarize_downstream_cls.py`  
+  汇总四组下游分类结果，输出每类准确率、All/Head/Tail Acc 与 Avg Acc。
+- `tools/make_chap5_tables_and_plots.py`  
+  自动生成论文可用表格和图（CSV/TEX/PNG）。
+- `infinity/utils/downstream_metrics.py`  
+  训练循环可直接调用的下游指标计算与 wandb 记录工具。
+
+### 3) 推荐项目结构（与第5章对应）
+
+```text
+Infinity/
+├── generate_data.py                              # 生成 + 过滤 + 多尺度选优 + 统计
+├── scripts/
+│   ├── one_click_smoke.sh                        # 一键快速验证可运行性
+│   └── run_chap5_generation.sh                   # 一键跑四组生成实验
+├── tools/
+│   ├── build_train_count_csv.py                  # 训练集类别计数
+│   ├── summarize_downstream_cls.py               # 下游分类指标汇总
+│   └── make_chap5_tables_and_plots.py            # 论文图表自动生成
+└── infinity/utils/downstream_metrics.py          # 训练期指标与 wandb 日志接口
+```
+
+### 4) 快速实现（Quick Start）
+
+#### Step A: 一键检查代码可运行
+
+```bash
+cd Infinity
+bash scripts/one_click_smoke.sh
+```
+
+#### Step B: 运行四组生成实验（支持动态预算 + 多尺度）
+
+```bash
+cd Infinity
+export TRAIN_PATH=/path/to/DIOR/train
+export TEST_PATH=/path/to/DIOR/test
+export PERSONAL_DATA_PATH=/picassox/oss-picassox-train-release/segmentation/intern_segmentation/dc1
+export OUTPUT_ROOT=/path/to/chap5_gen_outputs
+export SFT_MODEL_PATH=/path/to/your_var_ckpt.pth
+export CLASSIFIER_CKPTS=/path/cls1.pth,/path/cls2.pth,/path/cls3.pth
+
+# 动态预算（可选）
+export BUDGET_MODE=entropy_dynamic
+export BUDGET_TOTAL=2000
+export ENTROPY_CKPT=/path/to/entropy_classifier.pth
+export USE_MULTISCALE=1
+
+bash scripts/run_chap5_generation.sh
+```
+
+#### Step C: 汇总下游分类评测
+
+1. 先统计训练集类别频次：
+
+```bash
+python3 tools/build_train_count_csv.py \
+  --train_path /path/to/DIOR/train \
+  --out_csv /path/to/chap5_cls_summary/train_count.csv
+```
+
+2. 汇总四组实验预测结果（每个 `pred.csv` 需至少包含 `y_true,y_pred` 列）：
+
+```bash
+python3 tools/summarize_downstream_cls.py \
+  --train_path /path/to/DIOR/train \
+  --train_count_csv /path/to/chap5_cls_summary/train_count.csv \
+  --pred_csv \
+    var_full=/path/to/var_full/test_pred.csv \
+    var_confidence=/path/to/var_confidence/test_pred.csv \
+    var_entropy=/path/to/var_entropy/test_pred.csv \
+    var_joint=/path/to/var_joint/test_pred.csv \
+  --out_dir /path/to/chap5_cls_summary
+```
+
+#### Step D: 自动生成论文图表
+
+```bash
+python3 tools/make_chap5_tables_and_plots.py \
+  --exp_root /path/to/chap5_gen_outputs \
+  --downstream_summary_csv /path/to/chap5_cls_summary/summary_metrics.csv \
+  --per_class_csv /path/to/chap5_cls_summary/per_class_metrics.csv \
+  --baseline_exp var_full \
+  --target_exp var_joint \
+  --out_dir /path/to/chap5_paper_assets
+```
+
+### 5) 主要输出文件（可直接用于论文）
+
+- 生成阶段：
+  - `generation_records.csv`：逐样本记录（是否通过、过滤原因、尺度选择、耗时等）
+  - `generation_summary_per_class.csv`：类别级通过率与质量统计
+  - `generation_summary.json`：全局效率统计 + 动态预算信息
+- 下游汇总阶段：
+  - `summary_metrics.csv`：`All/Head/Tail` 的 `Acc` 与 `Avg Acc`
+  - `per_class_metrics.csv`：每类准确率（支持 tail gain 可视化）
+- 图表产出阶段：
+  - `tables/table_chap5_main_metrics.csv/.tex`
+  - `figures/fig_budget_entropy.png`
+  - `figures/fig_scale_distribution.png`
+  - `figures/fig_filter_metric_box.png`
+  - `figures/fig_tail_gain.png`
+
+### 6) wandb 记录建议（下游训练阶段）
+
+若你的训练脚本可拿到验证集 `y_true/y_pred`，可直接使用：
+
+```python
+from infinity.utils.downstream_metrics import (
+    build_head_tail_split,
+    compute_classification_metrics,
+    log_to_wandb_if_available,
+)
+
+split = build_head_tail_split(train_counts, tail_ratio=0.5)
+metrics, per_class = compute_classification_metrics(
+    y_true=all_targets,
+    y_pred=all_preds,
+    class_ids=sorted(train_counts.keys()),
+    train_counts=train_counts,
+    split=split,
+)
+log_to_wandb_if_available(metrics, step=epoch, prefix="DownstreamEval")
+```
+
+---
+
 <div align="center">
 
 [![demo platform](https://img.shields.io/badge/Play%20with%20Infinity%21-Infinity%20demo%20platform-lightblue)](https://opensource.bytedance.com/gmpt/t2i/invite)&nbsp;
