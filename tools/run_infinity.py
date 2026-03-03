@@ -35,6 +35,36 @@ from torchvision.transforms.functional import to_tensor
 from infinity.utils.dynamic_resolution import dynamic_resolution_h_w, h_div_w_templates
 
 
+import torch
+
+def align_infinity_checkpoint(ckpt, num_layers=12, layers_per_chunk=3):
+    # 1. 加载原始权重
+    state_dict = ckpt
+    if 'state_dict' in state_dict:
+        state_dict = state_dict['state_dict']
+
+    new_state_dict = {}
+    
+    for k, v in state_dict.items():
+        if k.startswith('blocks.'):
+            # 提取原始层索引 N (例如 'blocks.5.sa...' 中的 5)
+            parts = k.split('.')
+            old_idx = int(parts[1])
+            
+            # 计算新的 chunk 索引和 module 索引
+            chunk_idx = old_idx // layers_per_chunk
+            module_idx = old_idx % layers_per_chunk
+            
+            # 构建新的键名: block_chunks.{chunk_idx}.module.{module_idx}.{其余部分}
+            remaining_part = '.'.join(parts[2:])
+            new_key = f"block_chunks.{chunk_idx}.module.{module_idx}.{remaining_part}"
+            new_state_dict[new_key] = v
+        else:
+            # 非 blocks 的键 (如 lvl_embed, pos_start) 直接保留
+            new_state_dict[k] = v
+            
+    return new_state_dict
+
 def extract_key_val(text):
     pattern = r'<(.+?):(.+?)>'
     matches = re.findall(pattern, text)
@@ -120,10 +150,10 @@ def gen_one_img(
         negative_label_B_or_BLT = None
     print(f'cfg: {cfg_list}, tau: {tau_list}')
 
-    # src_img_3HW = src_image.unsqueeze(0).to('cuda', non_blocking=True)    # [B=1,c=3,h=256,w=256]
-    # src_img_features, _, _ = vae.encode_for_raw_features(src_img_3HW, scale_schedule=scale_schedule)    # [B, 32, 16,16]
+    use_cuda_amp = torch.cuda.is_available()
+    amp_ctx = torch.cuda.amp.autocast(enabled=use_cuda_amp, dtype=torch.bfloat16, cache_enabled=True)
 
-    with torch.cuda.amp.autocast(enabled=True, dtype=torch.bfloat16, cache_enabled=True):
+    with amp_ctx:
         stt = time.time()
         _, idx_Bld_list, img_list = infinity_test.autoregressive_infer_cfg(
             vae=vae,
@@ -165,6 +195,7 @@ def gen_one_img(
         img_si = vae.decode(summed_codes.squeeze(-3))
         img_si = (img_si + 1) / 2
         img_si = img_si.permute(0, 2, 3, 1).mul_(255).to(torch.uint8).flip(dims=(3,))
+        # img_si = img_si.permute(0, 2, 3, 1).mul_(255).to(torch.uint8)
         scale_imgs.append(img_si[0])
 
     return {
@@ -192,10 +223,17 @@ def save_slim_model(infinity_model_path, save_file=None, device='cpu', key='gpt_
 
 def load_tokenizer(t5_path =''):
     print(f'[Loading tokenizer and text encoder]')
-    text_tokenizer: T5TokenizerFast = AutoTokenizer.from_pretrained(t5_path, revision=None, legacy=True, local_files_only=True)
+    text_tokenizer: T5TokenizerFast = AutoTokenizer.from_pretrained(
+        t5_path, revision=None, legacy=True, local_files_only=True
+    )
     text_tokenizer.model_max_length = 512
-    text_encoder: T5EncoderModel = T5EncoderModel.from_pretrained(t5_path, torch_dtype=torch.float16, local_files_only=True)
-    text_encoder.to('cuda')
+
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    dtype = torch.float16 if device == 'cuda' else torch.float32
+    text_encoder: T5EncoderModel = T5EncoderModel.from_pretrained(
+        t5_path, torch_dtype=dtype, local_files_only=True
+    )
+    text_encoder.to(device)
     text_encoder.eval()
     text_encoder.requires_grad_(False)
     return text_tokenizer, text_encoder
@@ -253,8 +291,24 @@ def load_infinity(
 
         print(f'[Load Infinity weights]')
         if checkpoint_type == 'torch':
-            state_dict = torch.load(model_path, map_location=device)
-            print(infinity_test.load_state_dict(state_dict))
+            ckpt = torch.load(model_path, map_location=device)
+
+            if "trainer" in ckpt:
+                # 针对你的 CKPTSaver 格式
+                print("Detected 'trainer' key in checkpoint, extracting state_dict...")
+                state_dict = align_infinity_checkpoint(ckpt["trainer"]["gpt_wo_ddp"])
+            elif "state_dict" in ckpt:
+                # 针对常见的 PyTorch Lightning 或其它格式
+                state_dict = ckpt["state_dict"]
+            elif "model" in ckpt:
+                state_dict = ckpt["model"]
+            else:
+                state_dict = ckpt
+            
+            print(infinity_test.load_state_dict(state_dict, strict=True)) # 建议先试 True，确保全匹配
+
+            # print(infinity_test.load_state_dict(state_dict))
+            
         elif checkpoint_type == 'torch_shard':
             from transformers.modeling_utils import load_sharded_checkpoint
             load_sharded_checkpoint(infinity_test, model_path, strict=False)

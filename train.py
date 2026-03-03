@@ -3,7 +3,7 @@ import json
 import math
 import os
 import random
-import sys
+import sys 
 import time
 import traceback
 from collections import deque
@@ -530,6 +530,7 @@ def train_one_ep(
                 stepping = (g_it + 1) % args.ac == 0
                 step_cnt += int(stepping)
             
+            args.text_tokenizer, args.text_encoder = text_tokenizer, text_encoder
             with maybe_record_function('in_training'):
                 grad_norm_t, scale_log2_t = trainer.train_step(
                     ep=ep, it=it, g_it=g_it, stepping=stepping, clip_decay_ratio=clip_decay_ratio,

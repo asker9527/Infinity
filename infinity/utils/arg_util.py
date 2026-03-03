@@ -24,12 +24,12 @@ class Args(Tap):
     vae_ckpt: str = ''                  # VAE ckpt
     exp_name: str = ''                  # experiment name
     ds: str = 'oi'                      # only used in GPT training::load_viz_data & FID benchmark
-    model: str = ''                     # for VAE training, 'b' or any other for GPT training
+    model: str = 'layer12'                     # for VAE training, 'b' or any other for GPT training
     short_cap_prob: float = 0.2         # prob for training with short captions
     project_name: str = 'Infinity'      # name of wandb project
     tf32: bool = True                   # whether to use TensorFloat32
     auto_resume: bool = True            # whether to automatically resume from the last checkpoint found in args.bed
-    rush_resume: str = '/picassox/oss-picassox-train-release/segmentation/intern_segmentation/dc1/models/FoundationVision/Infinity/infinity_2b_reg.pth'               # pretrained infinity checkpoint
+    rush_resume: str = ''               # pretrained infinity checkpoint
     nowd: int = 1                       # whether to disable weight decay on sparse params (like class token)
     enable_hybrid_shard: bool = False   # whether to use hybrid FSDP
     inner_shard_degree: int = 1         # inner degree for FSDP
@@ -367,20 +367,21 @@ def init_dist_and_get_args():
     # 1. 定义路径变量 (请修改这里)
     local_out_path = "./outputs"
     bed_path = "/picassox/oss-picassox-train-release/segmentation/intern_segmentation/dc1/models/Foundation/Infinity"
-    data_path = "/picassox/intelligent-cpfs/segmentation/intern_segmentation/dc1/Infinity/data/Asker9527/Remote_Sense_Datasets/DIOR/train"
-    val_data_path = "/picassox/intelligent-cpfs/segmentation/intern_segmentation/dc1/Infinity/data/Asker9527/Remote_Sense_Datasets/DIOR/test"
+    data_path = "/picassox/intelligent-cpfs/segmentation/intern_segmentation/dc1/Infinity/data/Asker9527/Remote_Sense_Datasets/FGSC/train"
+    val_data_path = "/picassox/intelligent-cpfs/segmentation/intern_segmentation/dc1/Infinity/data/Asker9527/Remote_Sense_Datasets/FGSC/test"
     video_data_path = ""
-    exp_name = "debug_experiment022611"
+    exp_name = "FGSC030215"
     bed_path = os.path.join(bed_path, exp_name)
     local_out_path = os.path.join(local_out_path, exp_name)
 
     if args.model=='layer12':
         args.rush_resume = '/picassox/oss-picassox-train-release/segmentation/intern_segmentation/dc1/models/FoundationVision/Infinity/infinity_125M_256x256.pth'
-    
+    elif args.model=='2bc8':
+        args.rush_resume='/picassox/oss-picassox-train-release/segmentation/intern_segmentation/dc1/models/FoundationVision/Infinity/infinity_2b_reg.pth'
 
     # 2. 覆盖 args 参数
     if args.debug:
-        args.ep = 2
+        args.ep = 100
         args.opt = 'adamw'
         args.cum = 3
         args.sche = 'lin0'
@@ -402,7 +403,7 @@ def init_dist_and_get_args():
         args.exp_name = exp_name
         args.tblr = 6e-5
         args.pn = '0.06M'      # 这种带单位的通常是字符串处理
-        args.model = '2bc8'
+        args.model = 'layer12'
         args.lbs = 64
         args.workers = 8
         args.short_cap_prob = 0.5
@@ -411,8 +412,8 @@ def init_dist_and_get_args():
         args.iterable_data_buffersize = 30000
         args.Ct5 = 2048
         args.t5_path = '/picassox/oss-picassox-train-release/segmentation/intern_segmentation/dc1/models/google/flan-t5-xl'
-        args.vae_type = 32
-        args.vae_ckpt = '/picassox/oss-picassox-train-release/segmentation/intern_segmentation/dc1/models/FoundationVision/Infinity/infinity_vae_d32.pth'
+        args.vae_type = 16
+        args.vae_ckpt = '/picassox/oss-picassox-train-release/segmentation/intern_segmentation/dc1/models/FoundationVision/Infinity/infinity_vae_d16.pth'
         args.wp = 0.00000001
         args.wpe = 1
         args.dynamic_resolution_across_gpus = 1

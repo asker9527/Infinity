@@ -6,7 +6,7 @@ from pprint import pformat
 from typing import List, Optional, Tuple, Union
 import os.path as osp
 
-import seaborn as sns
+import seaborn as sns 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -27,6 +27,11 @@ from infinity.models.bitwise_self_correction import BitwiseSelfCorrection
 from infinity.utils import arg_util, misc, wandb_utils
 from infinity.utils.amp_opt import AmpOptimizer
 from infinity.utils.dynamic_resolution import dynamic_resolution_h_w
+from tools.diy_tools import draw_gernerated_image
+import os
+from PIL import Image
+from tools.run_infinity import gen_one_img  # 引入推理函数
+
 
 Ten = torch.Tensor
 FTen = torch.Tensor
@@ -164,7 +169,7 @@ class InfinityTrainer(object):
         h_div_w_template = h_div_w_templates[np.argmin(np.abs(h_div_w-h_div_w_templates))]
         scale_schedule = dynamic_resolution_h_w[h_div_w_template][args.pn]['scales']
         scale_schedule = [ (min(t, T//4+1), h, w) for (t,h, w) in scale_schedule]
-        
+
         # [forward]
         with self.gpt_opt.amp_ctx:
             with torch.amp.autocast('cuda', enabled=False):
@@ -215,11 +220,11 @@ class InfinityTrainer(object):
             loss = loss.mul(lw).sum(dim=-1).mean()
 
             if g_it % 50 ==0:
-                print(f'[train_step] ep={ep} it={it} g_it={g_it} loss={loss.item():.4f}')
-                from tools.diy_tools import draw_gernerated_image
-                if dist.get_rank() == 0:
-                    with torch.no_grad():
-                        draw_gernerated_image(self, logits_BLV[:8],inp_B3HW[:8] ,vae_scale_schedule, g_it,args.local_out_path)
+                with torch.no_grad():
+                    print(f'[train_step] ep={ep} it={it} g_it={g_it} loss={loss.item():.4f}')
+                    if dist.get_rank() == 0:
+                        with torch.no_grad():
+                            draw_gernerated_image(self, logits_BLV[:8],inp_B3HW[:8] ,vae_scale_schedule, g_it,args.local_out_path)
         
         # [backward]
         grad_norm_t, scale_log2_t = self.gpt_opt.backward_clip_step(ep=ep, it=it, g_it=g_it, stepping=stepping, logging_params=logging_params, loss=loss, clip_decay_ratio=clip_decay_ratio, stable=args.stable)
@@ -242,7 +247,7 @@ class InfinityTrainer(object):
             self.gpt_opt.optimizer.zero_grad(set_to_none=True)
         
         # [metric logging]
-        if metric_lg.log_every_iter or it == 0 or it in metric_lg.log_iters:
+        if metric_lg.log_every_iter or g_it % 50 ==0:
             B, seq_len = logits_BLV.shape[:2]
             if args.use_bit_label:
                 res_loss = self.train_loss(logits_BLV.reshape(B, seq_len, -1, 2).permute(0,3,1,2), gt_BL).mean(dim=-1).mean(0)

@@ -538,113 +538,6 @@ class Infinity(nn.Module):
         
         num_stages_minus_1 = len(scale_schedule)-1
         summed_codes = 0
-        # for si, pn in enumerate(scale_schedule):   # si: i-th scale
-        #     cfg = cfg_list[si]
-        #     if si >= trunk_scale:
-        #         break
-        #     cur_L += np.array(pn).prod()
-
-        #     need_to_pad = 0
-        #     attn_fn = None
-        #     if self.use_flex_attn:
-        #         # need_to_pad = (self.pad_to_multiplier - cur_L % self.pad_to_multiplier) % self.pad_to_multiplier
-        #         # if need_to_pad:
-        #         #     last_stage = F.pad(last_stage, (0, 0, 0, need_to_pad))
-        #         attn_fn = self.attn_fn_compile_dict.get(tuple(scale_schedule[:(si+1)]), None)
-
-        #     # assert self.attn_bias_for_masking[:, :, last_L:cur_L, :cur_L].sum() == 0, f'AR with {(self.attn_bias_for_masking[:, :, last_L:cur_L, :cur_L] != 0).sum()} / {self.attn_bias_for_masking[:, :, last_L:cur_L, :cur_L].numel()} mask item'
-        #     layer_idx = 0
-        #     for block_idx, b in enumerate(self.block_chunks):
-        #         # last_stage shape: [4, 1, 2048], cond_BD_or_gss.shape: [4, 1, 6, 2048], ca_kv[0].shape: [64, 2048], ca_kv[1].shape [5], ca_kv[2]: int
-        #         if self.add_lvl_embeding_only_first_block and block_idx == 0:   # positional embedding
-        #             last_stage = self.add_lvl_embeding(last_stage, si, scale_schedule, need_to_pad=need_to_pad)
-        #         if not self.add_lvl_embeding_only_first_block: 
-        #             last_stage = self.add_lvl_embeding(last_stage, si, scale_schedule, need_to_pad=need_to_pad)
-                
-        #         for m in b.module:
-        #             last_stage = m(x=last_stage, cond_BD=cond_BD_or_gss, ca_kv=ca_kv, attn_bias_or_two_vector=None, attn_fn=attn_fn, scale_schedule=scale_schedule, rope2d_freqs_grid=self.rope2d_freqs_grid, scale_ind=si)
-        #             if (cfg != 1) and (layer_idx in abs_cfg_insertion_layers):
-        #                 # print(f'add cfg={cfg} on {layer_idx}-th layer output')
-        #                 last_stage = cfg * last_stage[:B] + (1-cfg) * last_stage[B:]
-        #                 last_stage = torch.cat((last_stage, last_stage), 0)
-        #             layer_idx += 1
-            
-        #     if (cfg != 1) and add_cfg_on_logits:
-        #         # print(f'add cfg on add_cfg_on_logits')
-        #         logits_BlV = self.get_logits(last_stage, cond_BD).mul(1/tau_list[si])
-        #         logits_BlV = cfg * logits_BlV[:B] + (1-cfg) * logits_BlV[B:]
-        #     else:
-        #         logits_BlV = self.get_logits(last_stage[:B], cond_BD[:B]).mul(1/tau_list[si])
-            
-        #     if self.use_bit_label:
-        #         tmp_bs, tmp_seq_len = logits_BlV.shape[:2]
-        #         logits_BlV = logits_BlV.reshape(tmp_bs, -1, 2)
-        #         idx_Bld = sample_with_top_k_top_p_also_inplace_modifying_logits_(logits_BlV, rng=rng, top_k=top_k or self.top_k, top_p=top_p or self.top_p, num_samples=1)[:, :, 0]
-        #         idx_Bld = idx_Bld.reshape(tmp_bs, tmp_seq_len, -1)
-        #     else:
-        #         idx_Bl = sample_with_top_k_top_p_also_inplace_modifying_logits_(logits_BlV, rng=rng, top_k=top_k or self.top_k, top_p=top_p or self.top_p, num_samples=1)[:, :, 0]
-        #     if vae_type != 0:
-        #         assert returns_vemb
-        #         if si < gt_leak:
-        #             idx_Bld = gt_ls_Bl[si]
-        #         else:
-        #             assert pn[0] == 1
-        #             idx_Bld = idx_Bld.reshape(B, pn[1], pn[2], -1) # shape: [B, h, w, d] or [B, h, w, 4d]
-        #             if self.apply_spatial_patchify: # unpatchify operation
-        #                 idx_Bld = idx_Bld.permute(0,3,1,2) # [B, 4d, h, w]
-        #                 idx_Bld = torch.nn.functional.pixel_shuffle(idx_Bld, 2) # [B, d, 2h, 2w]
-        #                 idx_Bld = idx_Bld.permute(0,2,3,1) # [B, 2h, 2w, d]
-        #             idx_Bld = idx_Bld.unsqueeze(1) # [B, 1, h, w, d] or [B, 1, 2h, 2w, d]
-
-        #         idx_Bld_list.append(idx_Bld)
-        #         codes = vae.quantizer.lfq.indices_to_codes(idx_Bld, label_type='bit_label') # [B, d, 1, h, w] or [B, d, 1, 2h, 2w]
-        #         if si != num_stages_minus_1:
-        #             summed_codes += F.interpolate(codes, size=vae_scale_schedule[-1], mode=vae.quantizer.z_interplote_up)
-        #             last_stage = F.interpolate(summed_codes, size=vae_scale_schedule[si+1], mode=vae.quantizer.z_interplote_up) # [B, d, 1, h, w] or [B, d, 1, 2h, 2w]
-        #             last_stage = last_stage.squeeze(-3) # [B, d, h, w] or [B, d, 2h, 2w]
-        #             if self.apply_spatial_patchify: # patchify operation
-        #                 last_stage = torch.nn.functional.pixel_unshuffle(last_stage, 2) # [B, 4d, h, w]
-        #             last_stage = last_stage.reshape(*last_stage.shape[:2], -1) # [B, d, h*w] or [B, 4d, h*w]
-        #             last_stage = torch.permute(last_stage, [0,2,1]) # [B, h*w, d] or [B, h*w, 4d]
-        #         else:
-        #             summed_codes += codes
-        #     else:
-        #         if si < gt_leak:
-        #             idx_Bl = gt_ls_Bl[si]
-        #         h_BChw = self.quant_only_used_in_inference[0].embedding(idx_Bl).float()   # BlC
-
-        #         # h_BChw = h_BChw.float().transpose_(1, 2).reshape(B, self.d_vae, scale_schedule[si][0], scale_schedule[si][1])
-        #         h_BChw = h_BChw.transpose_(1, 2).reshape(B, self.d_vae, scale_schedule[si][0], scale_schedule[si][1], scale_schedule[si][2])
-        #         ret.append(h_BChw if returns_vemb != 0 else idx_Bl)
-        #         idx_Bl_list.append(idx_Bl)
-        #         if si != num_stages_minus_1:
-        #             accu_BChw, last_stage = self.quant_only_used_in_inference[0].one_step_fuse(si, num_stages_minus_1+1, accu_BChw, h_BChw, scale_schedule)
-            
-        #     if si != num_stages_minus_1:
-        #         last_stage = self.word_embed(self.norm0_ve(last_stage))
-        #         last_stage = last_stage.repeat(bs//B, 1, 1)
-
-        # if inference_mode:
-        #     for b in self.unregistered_blocks: (b.sa if isinstance(b, CrossAttnBlock) else b.attn).kv_caching(False)
-        # else:
-        #     assert self.num_block_chunks > 1
-        #     for block_chunk_ in self.block_chunks:
-        #         for module in block_chunk_.module.module:
-        #             (module.sa if isinstance(module, CrossAttnBlock) else module.attn).kv_caching(False)
-
-        # if not ret_img:
-        #     return ret, idx_Bl_list, []
-        
-        # if vae_type != 0:
-        #     img = vae.decode(summed_codes.squeeze(-3))
-        # else:
-        #     img = vae.viz_from_ms_h_BChw(ret, scale_schedule=scale_schedule, same_shape=True, last_one=True)
-
-        # img = (img + 1) / 2
-        # img = img.permute(0, 2, 3, 1).mul_(255).to(torch.uint8).flip(dims=(3,))
-        # return ret, idx_Bl_list, img
-
-
         # ==============================================================================
         # PART 1: Next-Scale Prediction Loop (下一尺度预测循环)
         # 对应论文: "redefines... autoregressive learning on images as coarse-to-fine 'next-scale prediction'"
@@ -800,7 +693,7 @@ class Infinity(nn.Module):
             pass
 
         if not ret_img:
-            return ret, idx_Bl_list, []
+            return ret, idx_Bld_list, []
         
         # [Decode] VQVAE 解码
         if vae_type != 0:
@@ -811,7 +704,7 @@ class Infinity(nn.Module):
         # [Post-processing] 反归一化并转为 uint8 图像
         img = (img + 1) / 2
         img = img.permute(0, 2, 3, 1).mul_(255).to(torch.uint8).flip(dims=(3,))
-        return ret, idx_Bl_list, img
+        return ret, idx_Bld_list, img
 
     
     @for_visualize

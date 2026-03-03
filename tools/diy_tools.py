@@ -76,8 +76,8 @@ def get_models(personal_data_path, sft_models_path=None, config=None):
     if sft_models_path:
         model_path = sft_models_path
     else:
-        model_path= os.path.join(models_dir, 'FoundationVision/Infinity/infinity_2b_reg.pth')
-    vae_path=os.path.join(models_dir,'FoundationVision/Infinity/infinity_vae_d32.pth')
+        model_path= os.path.join(models_dir, 'FoundationVision/Infinity/infinity_125M_256x256.pth')
+    vae_path=os.path.join(models_dir,'FoundationVision/Infinity/infinity_vae_d16.pth')
     text_encoder_ckpt = os.path.join(models_dir, 'google/flan-t5-xl')
     print(text_encoder_ckpt)
     args=argparse.Namespace(
@@ -88,10 +88,10 @@ def get_models(personal_data_path, sft_models_path=None, config=None):
         vae_path=vae_path,
         add_lvl_embeding_only_first_block=1,
         use_bit_label=1,
-        model_type='infinity_layer12',  # infinity_layer12, infinity_2b
+        model_type='infinity_layer12',  # infinity_layer12, infinity_2b, 2bc8
         rope2d_each_sa_layer=1,
         rope2d_normalized_by_hw=2,
-        use_scale_schedule_embedding=0,
+        use_scale_schedule_embedding=0, 
         sampling_per_bits=1,
         text_encoder_ckpt=text_encoder_ckpt,
         text_channels=2048,

@@ -10,6 +10,7 @@ import torchvision.transforms.functional as TF
 
 import torchvision.transforms as transforms
 import torchvision.transforms.functional as F
+import matplotlib.pyplot as plt
 
 class ResizeAndPad:
     def __init__(self, target_size, fill=0, padding_mode='constant'):
@@ -174,7 +175,7 @@ class ImageTextFolder(datasets.ImageFolder):
         # print(class2label)
         label2class = {v: k for k, v in class2label.items()}
         class_name = label2class[int(target)]
-        text = f"A image of a {class_name}."
+        text = f"A high-resolution satellite top-down view of a {class_name} in a remote sensing image."
         return img, text
     
 def get_RS_datasets(args, train_path=None, test_path=None):
@@ -194,13 +195,13 @@ def get_RS_datasets(args, train_path=None, test_path=None):
         ResizeAndPad(target_size=image_size, padding_mode='reflect'), 
         
         # # --- 强烈建议加入的遥感专属数据增强 ---
-        # transforms.RandomHorizontalFlip(p=0.5), # 随机水平翻转
-        # transforms.RandomVerticalFlip(p=0.5),   # 随机垂直翻转
-        # transforms.RandomChoice([               # 随机旋转 90/180/270 度
-        #     transforms.RandomRotation((90, 90)),
-        #     transforms.RandomRotation((180, 180)),
-        #     transforms.RandomRotation((270, 270)),
-        # ]),
+        transforms.RandomHorizontalFlip(p=0.5), # 随机水平翻转
+        transforms.RandomVerticalFlip(p=0.5),   # 随机垂直翻转
+        transforms.RandomChoice([               # 随机旋转 90/180/270 度
+            transforms.RandomRotation((90, 90)),
+            transforms.RandomRotation((180, 180)),
+            transforms.RandomRotation((270, 270)),
+        ]),
         # -----------------------------------
         
         transforms.ToTensor(),
@@ -245,9 +246,9 @@ def get_RS_datasets(args, train_path=None, test_path=None):
 
 
 if __name__ == "__main__":
-    train_path = "/picassox/intelligent-cpfs/segmentation/intern_segmentation/dc1/Infinity/data/Asker9527/Remote_Sense_Datasets/DIOR/train"
-    test_path = "/picassox/intelligent-cpfs/segmentation/intern_segmentation/dc1/Infinity/data/Asker9527/Remote_Sense_Datasets/DIOR/test"
-    args = type('Args', (object,), {'pn': '0.25M'})()  # 创建一个简单的对象来模拟 args
+    train_path = "/picassox/intelligent-cpfs/segmentation/intern_segmentation/dc1/Infinity/data/Asker9527/Remote_Sense_Datasets/DOTA/train"
+    test_path = "/picassox/intelligent-cpfs/segmentation/intern_segmentation/dc1/Infinity/data/Asker9527/Remote_Sense_Datasets/DOTA/test"
+    args = type('Args', (object,), {'pn': '0.06M'})()  # 创建一个简单的对象来模拟 args
     train_dataset, test_dataset = get_RS_datasets(args, train_path, test_path)
     print("train dataset size:", len(train_dataset))
     print("test dataset size:", len(test_dataset))
@@ -255,7 +256,6 @@ if __name__ == "__main__":
     for img, txt in train_loader:
         print("图像数据:", img.shape)  # 输出图像数据的形状
         # plt展示4张图像，保存为img.png
-        import matplotlib.pyplot as plt
         img = (img + 1) / 2
         # img = img.permute(0, 2, 3, 1).numpy()
 

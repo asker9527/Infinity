@@ -3,12 +3,19 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
+from pathlib import Path
+# 确保项目根目录在 sys.path 中以加载 infinity 包
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 from typing import Dict
 
 import pandas as pd
 from torchvision import datasets
 
 from infinity.dataset.RS_datasets import get_class2label
+
 
 
 def infer_dataset_name(train_path: str) -> str:

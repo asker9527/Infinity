@@ -304,43 +304,102 @@ def select_scale_candidate(
         )
     return accepted_ids[-1]  # full mode defaults to highest scale
 
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate synthetic data for Chapter-5 experiments.")
-    parser.add_argument("--train_path", type=str, required=True)
-    parser.add_argument("--test_path", type=str, required=True)
-    parser.add_argument("--save_dir", type=str, required=True)
-    parser.add_argument("--personal_data_path", type=str, required=True)
-    parser.add_argument("--sft_model_path", type=str, default="")
-    parser.add_argument("--seed", type=int, default=42)
 
-    parser.add_argument("--augment_strategy", type=str, default="fixed", choices=["fixed", "balance", "ratio"])
-    parser.add_argument("--target_num", type=int, default=500)
-    parser.add_argument("--fixed_add", type=int, default=100)
-    parser.add_argument("--ratio", type=float, default=1.0)
+    # 数据路径与基础配置
+    parser.add_argument("--data_name", type=str, default="DOTA", help="数据集名称（DIOR/DOTA/FGSC）")
+    parser.add_argument("--save_dir", type=str, default="./outputs/generated_results", help="合成数据与统计结果保存目录")
+    parser.add_argument("--personal_data_path", type=str, default='/picassox/oss-picassox-train-release/segmentation/intern_segmentation/dc1', help="Infinity 个人化/底座模型目录")
+    parser.add_argument("--sft_model_path", type=str, default="", help="SFT 微调模型路径，留空则使用默认模型")
+    parser.add_argument("--seed", type=int, default=42, help="随机种子")
 
-    parser.add_argument("--budget_mode", type=str, default="static", choices=["static", "entropy_dynamic"])
-    parser.add_argument("--budget_total", type=int, default=-1)
-    parser.add_argument("--entropy_ckpt", type=str, default="")
-    parser.add_argument("--entropy_mix_imbalance", type=float, default=0.3)
-    parser.add_argument("--entropy_temperature", type=float, default=1.0)
-    parser.add_argument("--entropy_max_samples_per_class", type=int, default=200)
+    # 类别增广策略
+    parser.add_argument(
+        "--augment_strategy",
+        type=str,
+        default="fixed",
+        choices=["fixed", "balance", "ratio"],
+        help="增广策略：fixed 固定增量；balance 补齐到 target_num；ratio 按原样本比例扩增",
+    )
+    parser.add_argument("--target_num", type=int, default=500, help="balance 策略下每类目标样本数")
+    parser.add_argument("--fixed_add", type=int, default=100, help="fixed 策略下每类新增样本数")
+    parser.add_argument("--ratio", type=float, default=1.0, help="ratio 策略下新增比例（ceil(num * ratio)）")
 
-    parser.add_argument("--filter_mode", type=str, default="full", choices=["full", "confidence", "entropy", "joint"])
-    parser.add_argument("--confidence_min", type=float, default=0.50)
-    parser.add_argument("--entropy_max", type=float, default=0.80)
-    parser.add_argument("--disagreement_max", type=float, default=0.20)
-    parser.add_argument("--classifier_ckpts", type=str, default="")
-    parser.add_argument("--classifier_model", type=str, default="resnet50", choices=["resnet18", "resnet50"])
+    # 动态预算（按类别熵分配）
+    parser.add_argument(
+        "--budget_mode",
+        type=str,
+        default="static",
+        choices=["static", "entropy_dynamic"],
+        help="预算模式：static 使用基础预算；entropy_dynamic 按类别不确定性动态分配",
+    )
+    parser.add_argument("--budget_total", type=int, default=-1, help="总预算；<=0 时使用基础预算总和")
+    parser.add_argument("--entropy_ckpt", type=str, default="", help="用于估计类别熵的分类器权重路径")
+    parser.add_argument(
+        "--entropy_mix_imbalance",
+        type=float,
+        default=0.3,
+        help="熵与类不平衡混合系数（score = entropy + coef * imbalance）",
+    )
+    parser.add_argument(
+        "--entropy_temperature",
+        type=float,
+        default=1.0,
+        help="预算分配温度（>1 更平滑，<1 更尖锐）",
+    )
+    parser.add_argument(
+        "--entropy_max_samples_per_class",
+        type=int,
+        default=200,
+        help="每类用于估计熵的最大样本数，<=0 表示不限制",
+    )
 
-    parser.add_argument("--use_multiscale_candidates", type=int, default=1, choices=[0, 1])
-    parser.add_argument("--max_attempt_factor", type=float, default=5.0)
-    parser.add_argument("--cfg", type=float, default=3.0)
-    parser.add_argument("--tau", type=float, default=1.0)
-    parser.add_argument("--sampling_per_bits", type=int, default=1)
-    parser.add_argument("--overwrite", type=int, default=0, choices=[0, 1])
+    # 过滤器（生成后质量筛选）
+    parser.add_argument(
+        "--filter_mode",
+        type=str,
+        default="full",
+        choices=["full", "confidence", "entropy", "joint"],
+        help="过滤模式：full 不过滤；confidence/entropy/joint 按阈值筛选",
+    )
+    parser.add_argument("--confidence_min", type=float, default=0.50, help="最小置信度阈值")
+    parser.add_argument("--entropy_max", type=float, default=0.80, help="最大熵阈值（越小越严格）")
+    parser.add_argument("--disagreement_max", type=float, default=0.20, help="最大分歧阈值（集成 KL）")
+    parser.add_argument(
+        "--classifier_ckpts",
+        type=str,
+        default="",
+        help="过滤器分类器权重，多个用英文逗号分隔",
+    )
+    parser.add_argument(
+        "--classifier_model",
+        type=str,
+        default="resnet50",
+        choices=["resnet18", "resnet50"],
+        help="过滤器分类器骨干网络",
+    )
+
+    # 生成采样与输出控制
+    parser.add_argument(
+        "--use_multiscale_candidates",
+        type=int,
+        default=0,
+        choices=[0, 1],
+        help="是否启用单次生成多尺度候选（1 启用，0 仅最终尺度）",
+    )
+    parser.add_argument(
+        "--max_attempt_factor",
+        type=float,
+        default=5.0,
+        help="每类最大尝试倍数：max_attempts = ceil(target_gen * factor)",
+    )
+    parser.add_argument("--cfg", type=float, default=3.0, help="CFG 引导强度")
+    parser.add_argument("--tau", type=float, default=0.5, help="采样温度")
+    parser.add_argument("--sampling_per_bits", type=int, default=1, help="VAR 每比特采样次数")
+    parser.add_argument("--overwrite", type=int, default=1, choices=[0, 1], help="是否覆盖已存在文件")
+    parser.add_argument("--pn", type=str, default="0.06M", help="模型规模标识（与配置中的 pn 对应）")
     return parser.parse_args()
-
 
 def main() -> None:
     args = parse_args()
@@ -349,7 +408,9 @@ def main() -> None:
     torch.manual_seed(args.seed)
 
     # 1) Dataset and class metadata
-    train_dataset, test_dataset = get_RS_datasets(args.train_path, args.test_path)
+    args.train_path = f"/picassox/intelligent-cpfs/segmentation/intern_segmentation/dc1/Infinity/data/Asker9527/Remote_Sense_Datasets/{args.data_name}/train"
+    args.test_path = f"/picassox/intelligent-cpfs/segmentation/intern_segmentation/dc1/Infinity/data/Asker9527/Remote_Sense_Datasets/{args.data_name}/train"
+    train_dataset, test_dataset = get_RS_datasets(args, args.train_path, args.test_path)
     print(f"[INFO] train size={len(train_dataset)}, test size={len(test_dataset)}")
 
     dataset_name = infer_dataset_name(args.train_path, args.test_path)
@@ -435,7 +496,11 @@ def main() -> None:
     vae, infinity, text_tokenizer, text_encoder, model_args = get_models(
         personal_data_path=args.personal_data_path,
         sft_models_path=sft_model_path,
-        config={"sampling_per_bits": args.sampling_per_bits},
+        config={"sampling_per_bits": args.sampling_per_bits,
+                "pn":'0.06M',
+                "vae_type":16,
+                "model_type":'infinity_layer12',
+                },
     )
     h_div_w_template = h_div_w_templates[np.argmin(np.abs(h_div_w_templates - 1.0))]
     scale_schedule = dynamic_resolution_h_w[h_div_w_template][model_args.pn]["scales"]
@@ -453,7 +518,7 @@ def main() -> None:
     ):
         if num_to_generate <= 0:
             continue
-        prompt = f"a photo of a {class_name}"
+        prompt = f"A high-resolution satellite top-down view of a {class_name} in a remote sensing image."
         class_dir = os.path.join(args.save_dir, sanitize_filename(class_name))
         os.makedirs(class_dir, exist_ok=True)
         valid_count = 0
@@ -507,7 +572,9 @@ def main() -> None:
                 filename = f"synth_{valid_count:05d}_seed{seed}_s{chosen_scale_idx}.png"
                 file_path = os.path.join(class_dir, filename)
                 if args.overwrite or not os.path.exists(file_path):
-                    Image.fromarray(img_uint8).save(file_path)
+                    # gen_one_img 输出是 BGR，这里转成 RGB 再交给 PIL 保存
+                    img_rgb = img_uint8[..., ::-1] if (img_uint8.ndim == 3 and img_uint8.shape[2] == 3) else img_uint8
+                    Image.fromarray(img_rgb).save(file_path)
                 file_rel = os.path.relpath(file_path, args.save_dir)
                 valid_count += 1
                 global_kept += 1
