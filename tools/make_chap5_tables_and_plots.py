@@ -280,29 +280,32 @@ def plot_tail_gain(per_class_csv: Optional[str], out_path: Path, baseline: str, 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build Chapter-5 thesis tables and plots from experiment outputs.")
-    parser.add_argument("--exp_root", type=str, default="", help="Root folder containing experiment dirs.")
+    parser.add_argument("--exp_root", type=str, default="./outputs/Generated_Results/DOTA", help="Root folder containing experiment dirs.")
     parser.add_argument(
         "--exp_dirs",
         type=str,
         nargs="*",
-        default=[],
+        default=['var_full=/picassox/intelligent-cpfs/segmentation/intern_segmentation/dc1/Infinity/outputs/Generated_Results/DOTA/var_full', 
+                 'var_confidence=/picassox/intelligent-cpfs/segmentation/intern_segmentation/dc1/Infinity/outputs/Generated_Results/DOTA/var_confidence',
+                 'var_entropy=/picassox/intelligent-cpfs/segmentation/intern_segmentation/dc1/Infinity/outputs/Generated_Results/DOTA/var_entropy',
+                 'var_joint=/picassox/intelligent-cpfs/segmentation/intern_segmentation/dc1/Infinity/outputs/Generated_Results/DOTA/var_joint'],
         help="Optional explicit experiment mapping: exp_name=/path/to/exp_dir",
     )
     parser.add_argument(
         "--downstream_summary_csv",
         type=str,
-        default="",
+        default="/picassox/intelligent-cpfs/segmentation/intern_segmentation/dc1/Infinity/outputs/downstream_cls_summary/summary_metrics.csv",
         help="summary_metrics.csv from tools/summarize_downstream_cls.py",
     )
     parser.add_argument(
         "--per_class_csv",
         type=str,
-        default="",
+        default="/picassox/intelligent-cpfs/segmentation/intern_segmentation/dc1/Infinity/outputs/downstream_cls_summary/per_class_metrics.csv",
         help="per_class_metrics.csv from tools/summarize_downstream_cls.py",
     )
     parser.add_argument("--baseline_exp", type=str, default="var_full")
     parser.add_argument("--target_exp", type=str, default="var_joint")
-    parser.add_argument("--out_dir", type=str, required=True)
+    parser.add_argument("--out_dir", type=str, default="./outputs/chap5_tables_and_plots")
     args = parser.parse_args()
 
     out_dir = Path(args.out_dir).resolve()

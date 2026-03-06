@@ -81,8 +81,11 @@ class EnsembleClassifier:
         if not ckpt_paths:
             raise ValueError("Classifier checkpoints are required.")
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
-        self.models = [self._load_one(path, num_classes, model_name) for path in ckpt_paths]
         self.num_classes = num_classes
+        self.models = []
+        for item in ckpt_paths:
+            backbone, ckpt_path = self._parse_expert_spec(item, default_model=model_name)
+            self.models.append(self._load_one(ckpt_path, num_classes, backbone))
         self.preprocess = transforms.Compose(
             [
                 transforms.ToPILImage(),
@@ -92,6 +95,18 @@ class EnsembleClassifier:
             ]
         )
 
+    def _parse_expert_spec(self, spec: str, default_model: str) -> Tuple[str, str]:
+        s = spec.strip()
+        # 支持: "resnet18:/a/b.pth"
+        if ":" in s:
+            left, right = s.split(":", 1)
+            left = left.strip().lower()
+            right = right.strip()
+            if left in {"resnet18", "resnet50", "mobilenet_v2", "efficientnet_b0"} and right:
+                return left, right
+        # 兼容旧格式: "/a/b.pth"
+        return default_model, s
+
     def _build_model(self, model_name: str, num_classes: int) -> torch.nn.Module:
         if model_name == "resnet50":
             model = models.resnet50(weights=None)
@@ -100,6 +115,15 @@ class EnsembleClassifier:
         if model_name == "resnet18":
             model = models.resnet18(weights=None)
             model.fc = torch.nn.Linear(model.fc.in_features, num_classes)
+            return model
+        if model_name == "mobilenet_v2":
+            model = models.mobilenet_v2(weights=None)
+            model.classifier[1] = torch.nn.Linear(model.last_channel, num_classes)
+            return model
+        if model_name == "efficientnet_b0":
+            model = models.efficientnet_b0(weights=None)
+            in_features = model.classifier[1].in_features
+            model.classifier[1] = torch.nn.Linear(in_features, num_classes)
             return model
         raise ValueError(f"Unsupported classifier model: {model_name}")
 
@@ -160,18 +184,27 @@ class GeneratedDataFilter:
                 "reason": "full_pass",
             }
 
-        probs_tk = self.classifier.predict_probs(image_hwc_uint8)  # [T, K]
+        probs_tk = self.classifier.predict_probs(image_hwc_uint8)  
         p_bar = probs_tk.mean(dim=0)
         pred_idx = int(torch.argmax(p_bar).item())
-        confidence = float(torch.max(p_bar).item())
+
         eps = 1e-8
-        entropy = float((-(p_bar * torch.log(p_bar + eps)).sum() / math.log(p_bar.numel())).item())
+        logk = math.log(p_bar.numel())
+
+        # 改动点：平均 confidence（专家级 top1 的平均）
+        confidence = float(torch.max(probs_tk, dim=1).values.mean().item())
+
+        # 改动点：平均 entropy（专家级 entropy 的平均）
+        entropy_t = (-(probs_tk * torch.log(probs_tk + eps)).sum(dim=1) / logk)
+        entropy = float(entropy_t.mean().item())
+
+        # 保留原有分歧定义
         kls = []
         for t in range(probs_tk.shape[0]):
             p_t = probs_tk[t]
             kl = torch.sum(p_t * (torch.log(p_t + eps) - torch.log(p_bar + eps)))
             kls.append(kl)
-        disagreement = float((torch.stack(kls).mean() / math.log(p_bar.numel())).item())
+        disagreement = float((torch.stack(kls).mean() / logk).item())
 
         if pred_idx != target_idx:
             return {
@@ -252,8 +285,9 @@ def estimate_class_entropy(
             continue
         img = np.array(Image.open(img_path).convert("RGB"))
         probs_tk = classifier.predict_probs(img)
-        p_bar = probs_tk.mean(dim=0)
-        entropy = float((-(p_bar * torch.log(p_bar + eps)).sum() / math.log(p_bar.numel())).item())
+        # 改动点：按专家 entropy 求平均
+        k = probs_tk.shape[1]
+        entropy = float((-(probs_tk * torch.log(probs_tk + eps)).sum(dim=1) / math.log(k)).mean().item())
         entropy_vals[cid].append(entropy)
         counts_used[cid] += 1
     out = {}
@@ -304,12 +338,40 @@ def select_scale_candidate(
         )
     return accepted_ids[-1]  # full mode defaults to highest scale
 
+def is_topk_mode(filter_mode: str) -> bool:
+    return filter_mode in {"topk_entropy", "topk_confidence", "topk_joint"}
+
+
+def topk_score(filter_mode: str, rec: Dict[str, float]) -> float:
+    if filter_mode == "topk_entropy":
+        return -float(rec["entropy"])  # entropy 越小越好
+    if filter_mode == "topk_confidence":
+        return float(rec["confidence"])  # confidence 越大越好
+    if filter_mode == "topk_joint":
+        return float(rec["confidence"] - rec["entropy"] - rec["disagreement"])  # 保持原 joint 分数
+    raise ValueError(f"Unsupported top-k mode: {filter_mode}")
+
+
+def select_scale_candidate_topk(
+    filter_mode: str,
+    filt_results: List[Dict[str, float]],
+    target_idx: int,
+) -> int:
+    # 先按类别匹配优先，再按分数
+    return max(
+        range(len(filt_results)),
+        key=lambda i: (
+            int(filt_results[i]["pred_idx"]) == int(target_idx),
+            topk_score(filter_mode, filt_results[i]),
+        ),
+    )
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate synthetic data for Chapter-5 experiments.")
 
     # 数据路径与基础配置
     parser.add_argument("--data_name", type=str, default="DOTA", help="数据集名称（DIOR/DOTA/FGSC）")
-    parser.add_argument("--save_dir", type=str, default="./outputs/generated_results", help="合成数据与统计结果保存目录")
+    parser.add_argument("--save_dir", type=str, default="./outputs/Generated_Results", help="合成数据与统计结果保存目录")
     parser.add_argument("--personal_data_path", type=str, default='/picassox/oss-picassox-train-release/segmentation/intern_segmentation/dc1', help="Infinity 个人化/底座模型目录")
     parser.add_argument("--sft_model_path", type=str, default="", help="SFT 微调模型路径，留空则使用默认模型")
     parser.add_argument("--seed", type=int, default=42, help="随机种子")
@@ -360,8 +422,8 @@ def parse_args() -> argparse.Namespace:
         "--filter_mode",
         type=str,
         default="full",
-        choices=["full", "confidence", "entropy", "joint"],
-        help="过滤模式：full 不过滤；confidence/entropy/joint 按阈值筛选",
+        choices=["full", "confidence", "entropy", "joint", "topk_entropy", "topk_confidence", "topk_joint"],
+        help="过滤模式：full/阈值模式/top-k 模式",
     )
     parser.add_argument("--confidence_min", type=float, default=0.50, help="最小置信度阈值")
     parser.add_argument("--entropy_max", type=float, default=0.80, help="最大熵阈值（越小越严格）")
@@ -369,15 +431,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--classifier_ckpts",
         type=str,
-        default="",
-        help="过滤器分类器权重，多个用英文逗号分隔",
+        default="resnet18:/picassox/intelligent-cpfs/segmentation/intern_segmentation/dc1/Infinity/data/models/Mulit_Classifer/FGSC/resnet18_bestmodel.pth",
+        help="过滤器分类器权重，多个用逗号分隔；支持 backbone:path（如 resnet18:/a.pth,mobilenet_v2:/b.pth）",
     )
     parser.add_argument(
         "--classifier_model",
         type=str,
-        default="resnet50",
-        choices=["resnet18", "resnet50"],
-        help="过滤器分类器骨干网络",
+        default="resnet18",
+        choices=["resnet18", "resnet50", "mobilenet_v2", "efficientnet_b0"],
+        help="默认骨干（当 classifier_ckpts 未写 backbone 前缀时使用）",
     )
 
     # 生成采样与输出控制
@@ -397,9 +459,80 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cfg", type=float, default=3.0, help="CFG 引导强度")
     parser.add_argument("--tau", type=float, default=0.5, help="采样温度")
     parser.add_argument("--sampling_per_bits", type=int, default=1, help="VAR 每比特采样次数")
-    parser.add_argument("--overwrite", type=int, default=1, choices=[0, 1], help="是否覆盖已存在文件")
+    parser.add_argument("--overwrite", type=int, default=0, choices=[0, 1], help="是否覆盖已存在文件")
     parser.add_argument("--pn", type=str, default="0.06M", help="模型规模标识（与配置中的 pn 对应）")
+
+    # 参考图引导（简化版）
+    parser.add_argument("--use_reference_image", type=int, default=1, choices=[0, 1], help="是否启用参考图引导")
+    parser.add_argument(
+        "--reference_scope",
+        type=str,
+        default="all",
+        choices=["class", "all"],
+        help="参考图范围：class=同类别随机，all=全类别随机",
+    )
+    parser.add_argument("--reference_gt_leak", type=int, default=2, help="传入 gen_one_img 的 gt_leak")
+
     return parser.parse_args()
+
+def pick_reference_image_from_train_dataset(
+    train_dataset,
+    class_name: str,
+    scope: str = "class",
+) -> str:
+    if not getattr(train_dataset, "samples", None):
+        return ""
+
+    if scope == "all":
+        return random.choice(train_dataset.samples)[0]
+
+    # scope == "class": 直接用 train_dataset 的类名做一致匹配
+    candidates = [p for p, ds_idx in train_dataset.samples if train_dataset.classes[ds_idx] == class_name]
+    if not candidates:
+        return random.choice(train_dataset.samples)[0]
+    return random.choice(candidates)
+
+
+@torch.no_grad()
+def extract_reference_gt_indices(
+    ref_img_path: str,
+    vae,
+    scale_schedule,
+    device: torch.device,
+) -> List[torch.Tensor]:
+    lanczos = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS
+    img = Image.open(ref_img_path).convert("RGB").resize((256, 256), resample=lanczos)
+    x = transforms.ToTensor()(img).unsqueeze(0).to(device, non_blocking=True)  # [1,3,256,256], [0,1]
+    x = x.add(x).add_(-1)  # [-1,1]
+
+    raw_features, _, _ = vae.encode_for_raw_features(x, scale_schedule=scale_schedule)
+    codes_out = raw_features.unsqueeze(2) if raw_features.dim() == 4 else raw_features
+    cum_var_input = torch.zeros_like(codes_out)
+
+    gt_all_bit_indices: List[torch.Tensor] = []
+    for si, _ in enumerate(scale_schedule):
+        residual = codes_out - cum_var_input
+        if si != len(scale_schedule) - 1:
+            residual = F.interpolate(residual, size=scale_schedule[si], mode=vae.quantizer.z_interplote_down).contiguous()
+
+        quantized, _, bit_indices, _ = vae.quantizer.lfq(residual)
+        gt_all_bit_indices.append(bit_indices)
+
+        cum_var_input = cum_var_input + F.interpolate(
+            quantized, size=scale_schedule[-1], mode=vae.quantizer.z_interplote_up
+        ).contiguous()
+
+    return gt_all_bit_indices
+
+def count_existing_synth_images(class_dir: str) -> int:
+    if not os.path.isdir(class_dir):
+        return 0
+    # 只统计最终文件名，不统计 cand_*
+    return sum(
+        1
+        for fn in os.listdir(class_dir)
+        if fn.startswith("synth_") and fn.endswith(".png")
+    )
 
 def main() -> None:
     args = parse_args()
@@ -423,8 +556,7 @@ def main() -> None:
     for _, idx in train_dataset.samples:
         cls_name = train_dataset.classes[idx]
         counts_by_name[cls_name] = counts_by_name.get(cls_name, 0) + 1
-    nums_per_class = [int(counts_by_name.get(name, 0)) for name in class_names]
-
+    nums_per_class = [int(counts_by_name.get(str(name), 0)) for name in class_indices]
     base_add_nums = set_number_of_samples_per_class(
         nums_per_class=nums_per_class,
         strategy=args.augment_strategy,
@@ -432,8 +564,13 @@ def main() -> None:
         fixed_add=args.fixed_add,
         ratio=args.ratio,
     )
-
+    print(f"[INFO] base_add_nums={base_add_nums}"*10)
     # 2) Build filter classifier (if needed)
+    # Top-K 模式下，评估仍复用基础指标模式
+    eval_filter_mode = args.filter_mode
+    if is_topk_mode(args.filter_mode):
+        eval_filter_mode = args.filter_mode.replace("topk_", "")
+
     classifier = None
     if args.filter_mode != "full":
         ckpts = [x.strip() for x in args.classifier_ckpts.split(",") if x.strip()]
@@ -444,7 +581,7 @@ def main() -> None:
             model_name=args.classifier_model,
         )
     data_filter = GeneratedDataFilter(
-        mode=args.filter_mode,
+        mode=eval_filter_mode,  # 修复：不要直接传 topk_*
         thresholds=FilterThresholds(
             confidence_min=args.confidence_min,
             entropy_max=args.entropy_max,
@@ -506,6 +643,12 @@ def main() -> None:
     scale_schedule = dynamic_resolution_h_w[h_div_w_template][model_args.pn]["scales"]
     scale_schedule = [(1, h, w) for (_, h, w) in scale_schedule]
 
+    # 不再构建任何参考图缓存/池，直接使用 train_dataset 即时采样
+    try:
+        vae_device = next(vae.parameters()).device
+    except StopIteration:
+        vae_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     os.makedirs(args.save_dir, exist_ok=True)
     all_records: List[Dict[str, object]] = []
     t_run_start = time.time()
@@ -518,28 +661,63 @@ def main() -> None:
     ):
         if num_to_generate <= 0:
             continue
+
         prompt = f"A high-resolution satellite top-down view of a {class_name} in a remote sensing image."
-        class_dir = os.path.join(args.save_dir, sanitize_filename(class_name))
+        class_dir = os.path.join(args.save_dir, sanitize_filename(str(class_idx)))
         os.makedirs(class_dir, exist_ok=True)
         valid_count = 0
         attempts = 0
-        max_attempts = max(1, int(math.ceil(num_to_generate * args.max_attempt_factor)))
+        topk_mode = is_topk_mode(args.filter_mode)
+        class_rec_indices: List[int] = []
+
+        # 新增：overwrite=0 时的快速跳过/续跑
+        existing_synth = count_existing_synth_images(class_dir)
+        if not bool(args.overwrite):
+            if existing_synth >= num_to_generate:
+                print(f"[SKIP] {class_name}: existing synth={existing_synth} >= target={num_to_generate}")
+                continue
+            if topk_mode and existing_synth > 0:
+                print(
+                    f"[SKIP] {class_name}: top-k mode with overwrite=0 and existing synth={existing_synth}. "
+                    f"Please clean class dir or set --overwrite 1."
+                )
+                continue
+            if (not topk_mode) and existing_synth > 0:
+                valid_count = existing_synth
+                print(f"[RESUME] {class_name}: existing synth={existing_synth}, continue to target={num_to_generate}")
+
+        if topk_mode:
+            max_attempts = max(1, int(math.ceil(num_to_generate * 3.0)))  # 候选倍数固定为 3
+        else:
+            max_attempts = max(1, int(math.ceil(num_to_generate * args.max_attempt_factor)))
+
         print(
             f"[CLASS] {class_name} (label={class_idx}) original={num_original} target_gen={num_to_generate} max_attempts={max_attempts}"
         )
 
-        while valid_count < num_to_generate and attempts < max_attempts:
+        while (attempts < max_attempts) if topk_mode else (valid_count < num_to_generate and attempts < max_attempts):
             attempts += 1
             global_attempt += 1
             seed = random.randint(0, 2**31 - 1)
 
-            gen_t0 = time.time()
-            generated = gen_one_img(
-                infinity,
-                vae,
-                text_tokenizer,
-                text_encoder,
-                prompt,
+            # 参考图：直接从 train_dataset 按 scope 即时随机
+            ref_img_path = ""
+            ref_gt_ls_Bl = None
+            if bool(args.use_reference_image):
+                ref_img_path = pick_reference_image_from_train_dataset(
+                    train_dataset=train_dataset,
+                    class_name=class_name,
+                    scope=args.reference_scope,
+                )
+                if ref_img_path:
+                    ref_gt_ls_Bl = extract_reference_gt_indices(
+                        ref_img_path=ref_img_path,
+                        vae=vae,
+                        scale_schedule=scale_schedule,
+                        device=vae_device,
+                    )
+
+            gen_kwargs = dict(
                 g_seed=seed,
                 cfg_list=args.cfg,
                 tau_list=args.tau,
@@ -549,7 +727,19 @@ def main() -> None:
                 sampling_per_bits=model_args.sampling_per_bits,
                 return_all_scales=bool(args.use_multiscale_candidates),
             )
-            gen_cost = time.time() - gen_t0
+            if ref_gt_ls_Bl is not None:
+                gen_kwargs.update(gt_leak=float(args.reference_gt_leak), gt_ls_Bl=ref_gt_ls_Bl)
+            gen_time_start = time.time()
+            generated = gen_one_img(
+                infinity,
+                vae,
+                text_tokenizer,
+                text_encoder,
+                prompt,
+                **gen_kwargs,
+            )
+            gen_time_end = time.time()
+            gen_cost = gen_time_end - gen_time_start
 
             # Build candidates: final only OR all scales.
             if isinstance(generated, dict):
@@ -560,19 +750,33 @@ def main() -> None:
 
             filt_t0 = time.time()
             filt_results = [data_filter.evaluate(img, target_idx=class_idx) for img in candidate_imgs]
-            chosen_scale_idx = select_scale_candidate(args.filter_mode, filt_results)
             filt_cost = time.time() - filt_t0
 
-            chosen = filt_results[chosen_scale_idx] if chosen_scale_idx >= 0 else filt_results[-1]
-            accepted = int(chosen_scale_idx >= 0)
+            if topk_mode:
+                chosen_scale_idx = select_scale_candidate_topk(args.filter_mode, filt_results, target_idx=class_idx)
+                chosen = filt_results[chosen_scale_idx]
+                accepted = 0  # 先不通过，类内结束后统一 Top-K 决定
+                score = topk_score(args.filter_mode, chosen)
+            else:
+                chosen_scale_idx = select_scale_candidate(args.filter_mode, filt_results)
+                chosen = filt_results[chosen_scale_idx] if chosen_scale_idx >= 0 else filt_results[-1]
+                accepted = int(chosen_scale_idx >= 0)
+                score = 0.0
 
             file_rel = ""
-            if accepted:
+            if topk_mode:
+                img_uint8 = candidate_imgs[chosen_scale_idx]
+                filename = f"cand_{attempts:05d}_seed{seed}_s{chosen_scale_idx}.png"
+                file_path = os.path.join(class_dir, filename)
+                if args.overwrite or not os.path.exists(file_path):
+                    img_rgb = img_uint8[..., ::-1] if (img_uint8.ndim == 3 and img_uint8.shape[2] == 3) else img_uint8
+                    Image.fromarray(img_rgb).save(file_path)
+                file_rel = os.path.relpath(file_path, args.save_dir)
+            elif accepted:
                 img_uint8 = candidate_imgs[chosen_scale_idx]
                 filename = f"synth_{valid_count:05d}_seed{seed}_s{chosen_scale_idx}.png"
                 file_path = os.path.join(class_dir, filename)
                 if args.overwrite or not os.path.exists(file_path):
-                    # gen_one_img 输出是 BGR，这里转成 RGB 再交给 PIL 保存
                     img_rgb = img_uint8[..., ::-1] if (img_uint8.ndim == 3 and img_uint8.shape[2] == 3) else img_uint8
                     Image.fromarray(img_rgb).save(file_path)
                 file_rel = os.path.relpath(file_path, args.save_dir)
@@ -586,26 +790,67 @@ def main() -> None:
                 "prompt": prompt,
                 "seed": seed,
                 "accepted": accepted,
-                "reason": chosen["reason"] if accepted else "all_scales_rejected",
+                "reason": chosen["reason"] if (accepted and not topk_mode) else ("topk_candidate" if topk_mode else "all_scales_rejected"),
                 "pred_idx": int(chosen["pred_idx"]),
                 "confidence": float(chosen["confidence"]),
                 "entropy": float(chosen["entropy"]),
                 "disagreement": float(chosen["disagreement"]),
+                "topk_score": float(score),
                 "chosen_scale_idx": int(chosen_scale_idx),
                 "num_scales": int(len(candidate_imgs)),
                 "gen_time_s": gen_cost,
                 "filter_time_s": filt_cost,
                 "total_time_s": gen_cost + filt_cost,
                 "file_relpath": file_rel,
+                "ref_used": int(ref_gt_ls_Bl is not None),
+                "ref_scope": args.reference_scope if ref_gt_ls_Bl is not None else "",
+                "ref_image_relpath": os.path.relpath(ref_img_path, args.train_path) if ref_gt_ls_Bl is not None else "",
             }
             all_records.append(rec)
+            if topk_mode:
+                class_rec_indices.append(len(all_records) - 1)
+
             print(
                 f"  [TRY {attempts}/{max_attempts}] keep={rec['accepted']} scale={rec['chosen_scale_idx']} "
                 f"reason={rec['reason']} conf={rec['confidence']:.4f} H={rec['entropy']:.4f} D={rec['disagreement']:.4f} "
-                f"kept={valid_count}/{num_to_generate}"
+                f"ref={rec['ref_used']} kept={valid_count}/{num_to_generate}"
             )
 
-        if attempts >= max_attempts and valid_count < num_to_generate:
+        if topk_mode:
+            ranked = sorted(
+                class_rec_indices,
+                key=lambda idx: (
+                    int(all_records[idx]["pred_idx"]) == int(class_idx),
+                    float(all_records[idx]["topk_score"]),
+                ),
+                reverse=True,
+            )
+            keep_set = set(ranked[:num_to_generate])
+            new_valid = 0
+            for idx in class_rec_indices:
+                rec = all_records[idx]
+                old_path = os.path.join(args.save_dir, rec["file_relpath"]) if rec["file_relpath"] else ""
+                if idx in keep_set:
+                    new_name = f"synth_{new_valid:05d}_seed{rec['seed']}_s{rec['chosen_scale_idx']}.png"
+                    new_path = os.path.join(class_dir, new_name)
+                    if old_path and os.path.exists(old_path):
+                        os.replace(old_path, new_path)
+                    rec["accepted"] = 1
+                    rec["reason"] = "topk_keep"
+                    rec["file_relpath"] = os.path.relpath(new_path, args.save_dir)
+                    new_valid += 1
+                    global_kept += 1
+                else:
+                    rec["accepted"] = 0
+                    rec["reason"] = "topk_drop"
+                    if old_path and os.path.exists(old_path):
+                        os.remove(old_path)
+                    rec["file_relpath"] = ""
+            valid_count = new_valid
+            if valid_count < num_to_generate:
+                print(f"[WARN] {class_name}: top-k kept {valid_count}/{num_to_generate}.")
+
+        if (not topk_mode) and attempts >= max_attempts and valid_count < num_to_generate:
             print(f"[WARN] {class_name}: reached max attempts, generated {valid_count}/{num_to_generate}.")
 
     # 6) Save statistics
@@ -631,6 +876,11 @@ def main() -> None:
             "disagreement_max": args.disagreement_max,
         },
         "planner": planner_info,
+        "reference": {
+            "use_reference_image": int(args.use_reference_image),
+            "reference_scope": args.reference_scope,
+            "reference_gt_leak": float(args.reference_gt_leak),
+        },
     }
 
     if len(df):

@@ -33,16 +33,30 @@ def infer_dataset_name(train_path: str) -> str:
 
 
 def parse_pred_csv_pairs(pairs: List[str]) -> List[Tuple[str, str]]:
+    # 兼容 argparse 传入 str 的情况（当前 --pred_csv 是 type=str）
+    if isinstance(pairs, str):
+        pairs = [pairs]
+
     out = []
-    for p in pairs:
-        if "=" not in p:
-            raise ValueError(f"Invalid --pred_csv item '{p}', expected name=path")
-        name, path = p.split("=", 1)
-        name = name.strip()
-        path = path.strip()
-        if not name or not path:
-            raise ValueError(f"Invalid --pred_csv item '{p}'")
-        out.append((name, path))
+    for idx, p in enumerate(pairs):
+        p = p.strip()
+        if not p:
+            continue
+
+        # 支持 name=path
+        if "=" in p:
+            name, path = p.split("=", 1)
+            name = name.strip()
+            path = path.strip()
+            if not name or not path:
+                raise ValueError(f"Invalid --pred_csv item '{p}'")
+            out.append((name, path))
+        else:
+            # 支持仅传路径：自动用文件名作为实验名
+            out.append((Path(p).stem or f"exp_{idx+1}", p))
+
+    if not out:
+        raise ValueError("No valid --pred_csv item found.")
     return out
 
 
@@ -80,27 +94,20 @@ def maybe_init_wandb(args) -> object:
     )
     return wandb
 
-
+# python tools/summarize_downstream_cls.py --dataset_name fgsc
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Summarize downstream classification metrics for multiple experiments."
     )
-    parser.add_argument("--train_path", type=str, required=True, help="Used to infer dataset_name.")
-    parser.add_argument(
-        "--train_count_csv",
-        type=str,
-        required=True,
-        help="CSV with columns class_id,train_count for head/tail split.",
-    )
+    parser.add_argument("--dataset_name", type=str, default='FGSC', help="Dataset name (e.g., 'dior', 'dota', 'fgsc'). If not provided, it will be inferred from the train_path.")
     parser.add_argument(
         "--pred_csv",
         type=str,
-        nargs="+",
-        required=True,
+        default="/picassox/intelligent-cpfs/segmentation/intern_segmentation/dc1/LT-Uncertainty/dataset/test_results.csv",
         help="Format: exp_name=/path/to/pred.csv (repeat for 4 experiments).",
     )
-    parser.add_argument("--y_true_col", type=str, default="y_true")
-    parser.add_argument("--y_pred_col", type=str, default="y_pred")
+    parser.add_argument("--y_true_col", type=str, default="label")
+    parser.add_argument("--y_pred_col", type=str, default="pred")
     parser.add_argument("--tail_ratio", type=float, default=0.5)
     parser.add_argument(
         "--tail_classes",
@@ -108,7 +115,7 @@ def main() -> None:
         default="",
         help="Optional comma-separated class ids. If provided, overrides tail_ratio split.",
     )
-    parser.add_argument("--out_dir", type=str, required=True)
+    parser.add_argument("--out_dir", type=str, default='./outputs/downstream_cls_summary')
 
     # optional wandb logging
     parser.add_argument("--wandb_project", type=str, default="")
@@ -116,6 +123,12 @@ def main() -> None:
     parser.add_argument("--wandb_run_name", type=str, default="")
     parser.add_argument("--wandb_online", type=int, default=0, choices=[0, 1])
     args = parser.parse_args()
+    args.train_path = f"/picassox/intelligent-cpfs/segmentation/intern_segmentation/dc1/Infinity/data/Asker9527/Remote_Sense_Datasets/{args.dataset_name}/train"
+    args.train_count_csv = f"/picassox/intelligent-cpfs/segmentation/intern_segmentation/dc1/Infinity/outputs/Train_Count/{args.dataset_name}_train_counts.csv"
+
+    # DIY
+    args.pred_csv = "/picassox/intelligent-cpfs/segmentation/intern_segmentation/dc1/LT-Uncertainty/dataset/results/test_results_99.csv"
+
 
     os.makedirs(args.out_dir, exist_ok=True)
     pred_items = parse_pred_csv_pairs(args.pred_csv)

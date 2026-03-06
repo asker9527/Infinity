@@ -53,11 +53,10 @@ export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 wandb login --relogin 711f941f459be2c398272020e434baaf9bb1b2e7
 wandb online  # 将 W&B 切到离线模式（不需要登录，不上传；本地生成 wandb/ 目录）
 
-exp_name=FGSC_030401
+exp_name=FGSC_030502
 bed_path=checkpoints/${exp_name}/
 model_path=/picassox/oss-picassox-train-release/segmentation/intern_segmentation/dc1/models
 data_path=/picassox/intelligent-cpfs/segmentation/intern_segmentation/dc1/Infinity/data/Asker9527/Remote_Sense_Datasets/FGSC/train
-
 video_data_path=''
 local_out_path=$LOCAL_OUT/${exp_name}
 
@@ -65,11 +64,8 @@ local_out_path=$LOCAL_OUT/${exp_name}
 # rm -rf ${local_out_path}
 
 torchrun \
---nproc_per_node=2 \
+--nproc_per_node=1 \
 --nnodes=1 \
---node_rank=$RANK \
---master_addr=$MASTER_ADDR \
---master_port=23456 \
 train.py \
 --ep=100 \
 --opt=adamw \
@@ -90,7 +86,7 @@ train.py \
 --data_path=${data_path} \
 --video_data_path=${video_data_path} \
 --exp_name=${exp_name} \
---tblr=24e-5 \
+--tblr=8e-4 \
 --pn 0.06M \
 --model=layer12 \
 --lbs=32 \
@@ -103,8 +99,8 @@ train.py \
 --t5_path=$model_path/google/flan-t5-xl \
 --vae_type 16 \
 --vae_ckpt=$model_path/FoundationVision/Infinity/infinity_vae_d16.pth \
---wp 0.05 \
---wpe 0.01 \
+--wp 0.000001 \
+--wpe 1 \
 --dynamic_resolution_across_gpus 1 \
 --enable_dynamic_length_prompt 1 \
 --reweight_loss_by_scale 0 \
@@ -119,7 +115,7 @@ train.py \
 --log_freq=50 \
 --checkpoint_type='torch' \
 --prefetch_factor=16 \
---noise_apply_strength 0.1 \
+--noise_apply_strength 0.0 \
 --noise_apply_layers 5 \
 --apply_spatial_patchify 0 \
 --use_flex_attn=False \

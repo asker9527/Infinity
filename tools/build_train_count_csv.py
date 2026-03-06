@@ -28,15 +28,17 @@ def infer_dataset_name(train_path: str) -> str:
         return "fgsc23"
     raise ValueError(f"Cannot infer dataset name from train path: {train_path}")
 
+# python tools/build_train_count_csv.py --dataset_name FGSC
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build train class count CSV from ImageFolder directory.")
-    parser.add_argument("--train_path", type=str, required=True)
-    parser.add_argument("--out_csv", type=str, required=True)
+    parser.add_argument("--dataset_name", type=str, default='FGSC', help="Dataset name (e.g., 'dior', 'dota', 'fgsc'). If not provided, it will be inferred from the train_path.")
     args = parser.parse_args()
+    args.train_path = f"/picassox/intelligent-cpfs/segmentation/intern_segmentation/dc1/Infinity/data/Asker9527/Remote_Sense_Datasets/{args.dataset_name}/train"
+    args.out_csv = f"./outputs/Train_Count/{args.dataset_name}_train_counts.csv"
 
     dataset_name = infer_dataset_name(args.train_path)
-    class2label = get_class2label(dataset_name)  # class_name -> class_id
+    class2label = get_class2label(dataset_name)  # class_name -> class_id: {"non-ship": 0,...}
 
     ds = datasets.ImageFolder(root=args.train_path)
     counts_by_name: Dict[str, int] = {name: 0 for name in ds.classes}
@@ -50,7 +52,7 @@ def main() -> None:
             {
                 "class_id": int(class_id),
                 "class_name": class_name,
-                "train_count": int(counts_by_name.get(class_name, 0)),
+                "train_count": int(counts_by_name.get(str(class_id), 0)),
             }
         )
 
